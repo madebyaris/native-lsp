@@ -48,9 +48,9 @@ COMPARE_MODE=mixed ./target/release/compare-rss
 
 Success bar from research: native idle/open RSS **under 80 MB**.
 
-Latest run (Linux, release): native **~2.3 MB** vs Node **~47–54 MB** on PHP
-fixtures; **~2.3 MB vs ~46 MB** with ten languages in one process. Full table:
-[`docs/COMPARISON.md`](docs/COMPARISON.md).
+Latest run (Linux, release, with tree-sitter PHP): native **~4.8 MB** (80 PHP
+files) / **~7 MB** (200 PHP files) vs Node **~47–54 MB**; mixed languages
+**~3.1 MB vs ~46 MB**. Full table: [`docs/COMPARISON.md`](docs/COMPARISON.md).
 
 ## Fair comparison: same IDE, swap the LSP
 
@@ -71,7 +71,7 @@ COMPARE_MODE=ide ./target/release/compare-rss
 ```
 
 `compare-hosts` drives Neovim, Emacs/Eglot, Helix, and VS Code with the same
-mixed files. The language server stays ~2.3 MB native vs ~46 MB Node in every
+mixed files. The language server stays **~3 MB native vs ~46 MB Node** in every
 host; VS Code’s Electron tree is ~1.7 GB so the editor dominates.
 
 A homemade IDE vs Cursor + Intelephense would mix editor RAM, extensions, and
@@ -79,13 +79,14 @@ analysis depth. That is a product comparison, not an LSP comparison.
 
 ## Why VS Code looks huge with this LSP
 
-It is not native-lsp. The last host A/B had **native-lsp at ~2.2 MB** inside a
-**~1.7 GB** VS Code process tree. `compare-hosts` sums every process whose
-cmdline contains the unique `--user-data-dir` marker:
+It is not native-lsp. The last host A/B had **native-lsp at ~3 MB** (PHP
+tree-sitter loaded) inside a **~1.75 GB** VS Code process tree. `compare-hosts`
+sums every process whose cmdline contains the unique `--user-data-dir` marker:
 
-- Chromium **main** + **renderer** (Monaco workbench) + **GPU** + crashpad
+- Chromium **main** (~224 MB) + **renderer / Monaco** (~562 MB) + **GPU** (~94 MB)
+- Extra Electron **Node utilities** (~600 MB) + **extension host** (~187 MB)
 - The **extension host is still Node** (`vscode-languageclient` in
-  `editors/vscode/`). Native LSP only replaces the **server** child.
+  `editors/vscode/`). Native LSP only replaces the **server** child (~3 MB).
 - Opening ten files still loads the full workbench.
 
 Replay just that dump: `COMPARE_HOSTS=vscode ./target/release/compare-hosts`

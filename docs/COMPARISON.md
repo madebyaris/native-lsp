@@ -5,7 +5,8 @@ Measured on this cloud agent VM (Linux, `/proc/<pid>/status` `VmRSS`) after
 (initialize, `didOpen`, hover, park sleep). The Node server is
 `compare/node-lsp.mjs` (no npm deps). Default fixtures are generated PHP classes
 with `add_action` / `add_filter` hooks. `COMPARE_MODE=mixed` opens ten files of
-different languages from `testdata/mixed/` in one process.
+different languages from `testdata/mixed/` in one process. PHP open files now
+use a **tree-sitter CST**; other languages stay line-scan.
 
 This is **not** Intelephense. It is the V8 runtime tax plus a heap document
 store vs a static Rust binary with interned `u32` names. That is the first
@@ -15,30 +16,32 @@ claim from the research: drop Node before arguing about indexes.
 
 | stage | native-lsp | node-lsp | delta |
 | --- | ---: | ---: | ---: |
-| idle after initialize | 2.20 MB | 45.71 MB | native saves 43.51 MB |
-| after didOpen all files + hover | 2.33 MB | 46.88 MB | native saves 44.55 MB |
-| after park sleep | 2.33 MB | 46.88 MB | native saves 44.55 MB |
+| idle after initialize | 2.32 MB | 45.90 MB | native saves 43.59 MB |
+| after didOpen all files + hover | 4.75 MB | 47.09 MB | native saves 42.34 MB |
+| after park sleep | 4.75 MB | 47.12 MB | native saves 42.38 MB |
 
-Hover: native 0 ms, node 1 ms.
+Hover: native 0 ms, node 0 ms.
+
+Tree-sitter is why open RSS moved from ~2.3 MB (line-scan only) to **4.75 MB**:
+one PHP grammar plus 80 in-memory CSTs. Still far under the 80 MB bar.
 
 ## 200 PHP files
 
 | stage | native-lsp | node-lsp | delta |
 | --- | ---: | ---: | ---: |
-| idle after initialize | 2.13 MB | 45.86 MB | native saves 43.73 MB |
-| after didOpen all files + hover | 2.39 MB | 54.40 MB | native saves 52.02 MB |
-| after park sleep | 2.39 MB | 53.99 MB | native saves 51.60 MB |
+| idle after initialize | 2.25 MB | 45.88 MB | native saves 43.63 MB |
+| after didOpen all files + hover | 7.00 MB | 54.34 MB | native saves 47.34 MB |
+| after park sleep | 7.00 MB | 54.39 MB | native saves 47.39 MB |
 
-Hover: native 0 ms, node 2 ms.
+Hover: native 0 ms, node 0 ms.
 
 ## Notes
 
-- Native stays **~2.3 MB**, under the 80 MB research bar by a wide margin —
-  including ten languages in one process.
+- Native stays **~5–7 MB** with PHP CSTs, under the 80 MB research bar.
 - Node idle is already **~46 MB** (V8 floor). Opening 200 PHP files adds ~8 MB more.
-- Park sleep did not shrink RSS here: dropping parsed symbol vecs does not
-  return pages to the OS at this size. The win is not allocating them on a
-  45 MB runtime in the first place.
+- Park sleep did not shrink RSS here: dropping CST/symbol vecs does not
+  return pages to the OS at this size. The grammar stays mapped. The win is
+  still not allocating them on a 45 MB runtime in the first place.
 - Re-run: `cargo build --release --bin native-lsp --bin compare-rss && ./target/release/compare-rss`
 
 Replay: `COMPARE_FILES=200 ./target/release/compare-rss`
@@ -47,10 +50,11 @@ Replay: `COMPARE_FILES=200 ./target/release/compare-rss`
 
 `COMPARE_MODE=mixed` opens `testdata/mixed/` — PHP, JavaScript, TypeScript, HTML,
 CSS, JSON, YAML, SQL, Python, Rust — in a **single** native-lsp (and Node)
-process. Hover and `documentSymbol` are probed per file.
+process. Hover and `documentSymbol` are probed per file. `memoryReport` said
+parsers `tree-sitter, line-scan` with **1 CST** (the PHP file).
 
 | file | language | native symbols | native hover | node symbols | node hover |
-| --- | --- | ---: | --- | ---: | --- |
+| --- | --- | ---: | ---: | ---: | --- |
 | `01-plugin.php` | php | 6 | php class Mixed_Plugin | 6 | php class Mixed_Plugin |
 | `02-widget.js` | javascript | 3 | javascript class CartWidget | 3 | javascript class CartWidget |
 | `03-api.ts` | typescript | 5 | typescript type UserId | 5 | typescript type UserId |
@@ -64,11 +68,11 @@ process. Hover and `documentSymbol` are probed per file.
 
 | stage | native-lsp | node-lsp | delta |
 | --- | ---: | ---: | ---: |
-| idle after initialize | 2.16 MB | 45.82 MB | native saves 43.66 MB |
-| after didOpen 10 languages + hover | 2.26 MB | 46.27 MB | native saves 44.02 MB |
-| after park sleep | 2.26 MB | 46.29 MB | native saves 44.03 MB |
+| idle after initialize | 2.30 MB | 45.89 MB | native saves 43.59 MB |
+| after didOpen 10 languages + hover | 3.09 MB | 46.35 MB | native saves 43.25 MB |
+| after park sleep | 3.09 MB | 46.36 MB | native saves 43.27 MB |
 
-Ten languages did not move native RSS off the ~2.2 MB floor. Node is still the
+One PHP grammar plus nine line-scanners sits at **~3.1 MB**. Node is still the
 V8 idle tax. Interned unique names on native: 71 (includes WordPress stubs).
 Node’s “interned” counter is symbol instances (51), not unique strings.
 
@@ -91,35 +95,52 @@ swaps only the language-server child. IDE RSS is the editor process tree
 | helix | node | 36.57 MB | 45.99 MB | 82.56 MB |
 | emacs | native | 67.44 MB | 2.31 MB | **69.75 MB** |
 | emacs | node | 67.48 MB | 45.77 MB | 113.25 MB |
-| vscode | native | 1830.16 MB | 2.23 MB | 1832.39 MB |
-| vscode | node | 1715.34 MB | 45.97 MB | 1761.31 MB |
+| vscode | native | 1749.68 MB | 2.99 MB | 1752.68 MB |
+| vscode | node | 1710.14 MB | 46.09 MB | 1756.22 MB |
 
-Across every host the language server stays **~2.3 MB native vs ~46 MB Node**.
-The editor floor is what changes. VS Code’s Electron process tree is ~1.7 GB
-here, so the LSP gap is real but small next to the IDE. Neovim is the other
-end: a real LSP client at ~13 MB plus a 2.3 MB native server.
+Across every host the language server stays **~3 MB native vs ~46 MB Node**
+(tree-sitter PHP raises the native floor a little). The editor floor is what
+changes. VS Code’s Electron process tree is ~1.7 GB here, so the LSP gap is
+real but small next to the IDE. Neovim is the other end: a real LSP client at
+~13 MB plus a ~3 MB native server.
+
+VS Code rows are from this branch (`COMPARE_HOSTS=vscode`). Other hosts are
+the previous A/B; the server child is the same order of magnitude.
 
 ## Why VS Code is ~1.7 GB (not native-lsp)
 
-The native server in that run was **2.23 MB**. The rest is the editor:
+The native server in that run was **2.99 MB**. The rest is the editor.
+`compare-hosts` attributes every process whose cmdline contains the unique
+`--user-data-dir` temp dir to “vscode”:
 
-1. **Electron = Chromium.** Main process + renderer (Monaco) + GPU + crashpad.
-   `compare-hosts` attributes every process whose cmdline contains the unique
-   `--user-data-dir` temp dir to “vscode”.
-2. **The extension host is still Node.** `editors/vscode/extension.js` uses
-   `vscode-languageclient`. Native-lsp only replaces the language-server
-   **child**. You still pay for a Node extension host.
+### vscode + native-lsp (role totals)
+
+| role | processes | RSS |
+| --- | ---: | ---: |
+| node utility (Electron) | 3 | 597.98 MB |
+| renderer (Monaco / workbench) | 1 | 561.61 MB |
+| main (Electron) | 1 | 224.05 MB |
+| extensionHost (Node) | 1 | 186.81 MB |
+| gpu-process (Chromium) | 1 | 93.75 MB |
+| network utility | 1 | 81.17 MB |
+| crashpad | 1 | 4.31 MB |
+| language-server (native-lsp) | 1 | **2.99 MB** |
+
+1. **Electron = Chromium.** Main + renderer (Monaco) + GPU + crashpad plus a
+   handful of Node-shaped utility processes. That is most of the 1.75 GB.
+2. **The extension host is still Node (~187 MB).**
+   `editors/vscode/extension.js` uses `vscode-languageclient`. Native-lsp only
+   replaces the language-server **child**. You still pay for a Node extension
+   host.
 3. **Workbench cost is fixed.** Opening ten mixed files still starts the full
-   VS Code UI. Swap the LSP and the IDE RSS barely moves; swap Neovim for
-   VS Code and it jumps by ~1.8 GB.
+   VS Code UI. Swap native-lsp for node-lsp and IDE RSS stays ~1.7 GB; swap
+   Neovim for VS Code and it jumps by ~1.7 GB.
 
 Replay the per-process dump:
 
 ```bash
 COMPARE_HOSTS=vscode ./target/release/compare-hosts
 ```
-
-(Per-pid table is filled from the next `compare-hosts` run on this branch.)
 
 Replay:
 

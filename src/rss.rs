@@ -97,12 +97,17 @@ pub fn find_lsp_pid_global() -> Option<u32> {
 }
 
 pub fn is_lsp_pid(pid: u32) -> bool {
-    if comm(pid) == "native-lsp" {
+    cmdline_looks_like_lsp(&comm(pid), &cmdline(pid))
+}
+
+/// Token match: the binary path, not `cargo --bin native-lsp` or a temp dir.
+pub fn cmdline_looks_like_lsp(comm: &str, cmdline: &str) -> bool {
+    if comm == "native-lsp" {
         return true;
     }
-    cmdline(pid)
+    cmdline
         .split_whitespace()
-        .any(|part| part.ends_with("node-lsp.mjs") || part.ends_with("/native-lsp") || part == "native-lsp")
+        .any(|part| part.ends_with("/native-lsp") || part.ends_with("node-lsp.mjs"))
 }
 
 fn looks_like_lsp(pid: u32) -> bool {
@@ -142,24 +147,17 @@ pub fn process_role(pid: u32) -> String {
         }
         return "language-server (node-lsp)".into();
     }
-    let cmd = cmdline(pid);
-    if cmd.contains("crashpad") {
+    let comm_name = comm(pid);
+    if comm_name.contains("crashpad") {
         return "crashpad".into();
     }
+    let cmd = cmdline(pid);
     if let Some(kind) = electron_type(&cmd) {
         return match kind {
             "gpu-process" => "gpu-process (Chromium)".into(),
             "renderer" => "renderer (Monaco / workbench)".into(),
-            "utility" => {
-                if cmd.contains("extensionHost")
-                    || cmd.contains("NodeService")
-                    || cmd.contains("node.mojom")
-                {
-                    "extensionHost (Node)".into()
-                } else {
-                    "utility".into()
-                }
-            }
+            "utility" => utility_role(&cmd),
+            "crashpad-handler" => "crashpad".into(),
             "zygote" => "zygote".into(),
             "broker" => "broker".into(),
             other => other.to_string(),
@@ -169,8 +167,34 @@ pub fn process_role(pid: u32) -> String {
 }
 
 fn electron_type(cmd: &str) -> Option<&str> {
-    let rest = cmd.split("--type=").nth(1)?;
-    rest.split_whitespace().next()
+    // Prefer the Chromium --type= flag. Do not match --crashpad-handler-pid=.
+    for part in cmd.split_whitespace() {
+        if let Some(kind) = part.strip_prefix("--type=") {
+            return Some(kind);
+        }
+    }
+    None
+}
+
+fn utility_role(cmd: &str) -> String {
+    let sub = cmd
+        .split_whitespace()
+        .find_map(|p| p.strip_prefix("--utility-sub-type="))
+        .unwrap_or("");
+    if sub.contains("NodeService") {
+        if cmd.contains("--inspect-port") {
+            return "extensionHost (Node)".into();
+        }
+        return "node utility (Electron)".into();
+    }
+    if sub.contains("NetworkService") {
+        return "network utility".into();
+    }
+    if sub.is_empty() {
+        "utility".into()
+    } else {
+        format!("utility ({sub})")
+    }
 }
 
 pub fn format_proc_table(rows: &[ProcSample]) -> String {
@@ -212,5 +236,22 @@ mod tests {
     fn self_rss_is_nonzero() {
         let rss = rss_bytes().expect("VmRSS from /proc/self/status");
         assert!(rss > 1024, "rss was {rss}");
+    }
+
+    #[test]
+    fn lsp_match_is_the_binary_not_cargo_args() {
+        assert!(cmdline_looks_like_lsp("native-lsp", "/workspace/target/release/native-lsp"));
+        assert!(cmdline_looks_like_lsp(
+            "node",
+            "node /workspace/compare/node-lsp.mjs"
+        ));
+        assert!(!cmdline_looks_like_lsp(
+            "bash",
+            "cargo build --release --bin native-lsp --bin compare-hosts"
+        ));
+        assert!(!cmdline_looks_like_lsp(
+            "code",
+            "code --user-data-dir=/tmp/native-lsp-vscode-1/user"
+        ));
     }
 }

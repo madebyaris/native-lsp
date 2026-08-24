@@ -389,25 +389,21 @@ fn measure_vscode(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let mut ide_pids;
-    let mut lsp_pid = None;
+    let mut ide_pids = Vec::new();
+    let mut lsp_pid: Option<u32>;
     let deadline = Instant::now() + Duration::from_secs(25);
     while Instant::now() < deadline {
         ide_pids = rss::pids_with_cmdline(&marker);
         lsp_pid = ide_pids.iter().copied().find_map(rss::find_lsp_pid);
-        if lsp_pid.is_none() {
-            lsp_pid = rss::find_lsp_pid_global();
-        }
         if !ide_pids.is_empty() && lsp_pid.is_some() {
             break;
         }
         thread::sleep(Duration::from_millis(400));
     }
-    thread::sleep(Duration::from_millis(1500));
+    // Electron keeps spawning renderer / extensionHost after the first window.
+    thread::sleep(Duration::from_secs(5));
     ide_pids = rss::pids_with_cmdline(&marker);
-    if lsp_pid.is_none() {
-        lsp_pid = ide_pids.iter().copied().find_map(rss::find_lsp_pid);
-    }
+    lsp_pid = ide_pids.iter().copied().find_map(rss::find_lsp_pid);
     let ide = ide_pids
         .iter()
         .copied()
@@ -417,7 +413,13 @@ fn measure_vscode(
     let lsp = lsp_pid
         .filter(|p| rss::is_lsp_pid(*p))
         .and_then(|p| rss::rss_bytes_of(p.to_string()));
-    let procs = rss::sample_procs(&ide_pids);
+    let mut dump_pids = ide_pids.clone();
+    if let Some(pid) = lsp_pid.filter(|p| rss::is_lsp_pid(*p)) {
+        if !dump_pids.contains(&pid) {
+            dump_pids.push(pid);
+        }
+    }
+    let procs = rss::sample_procs(&dump_pids);
     let _ = child.kill();
     let _ = child.wait();
     // Electron often detaches; kill the user-data-dir process tree.

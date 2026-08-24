@@ -104,6 +104,9 @@ pub fn php_files(dir: &Path) -> std::io::Result<Vec<OpenFile>> {
 }
 
 pub fn write_php_fixtures(dir: &Path, count: usize) -> std::io::Result<()> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
     std::fs::create_dir_all(dir)?;
     for i in 0..count {
         let body = format!(
