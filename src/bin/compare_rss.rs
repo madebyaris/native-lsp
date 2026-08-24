@@ -15,6 +15,9 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mixed = std::env::var("COMPARE_MODE")
+        .map(|s| s.eq_ignore_ascii_case("mixed"))
+        .unwrap_or(false);
     let file_count: usize = std::env::var("COMPARE_FILES")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -39,22 +42,56 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("missing {}", node_script.display()).into());
     }
 
-    let fixture_dir = std::env::temp_dir().join("native-lsp-compare-fixture");
-    write_fixture(&fixture_dir, file_count)?;
-    let files = php_files(&fixture_dir)?;
+    let files = if mixed {
+        mixed_files()?
+    } else {
+        let fixture_dir = std::env::temp_dir().join("native-lsp-compare-fixture");
+        write_fixture(&fixture_dir, file_count)?;
+        php_files(&fixture_dir)?
+    };
+
+    if files.is_empty() {
+        return Err("no fixture files to open".into());
+    }
 
     eprintln!(
-        "fixture: {} PHP files in {}",
+        "fixture: {} files ({})",
         files.len(),
-        fixture_dir.display()
+        if mixed {
+            "mixed languages, one process".into()
+        } else {
+            format!(
+                "PHP, {}",
+                files[0].path.parent().unwrap_or(Path::new(".")).display()
+            )
+        }
     );
+    for file in &files {
+        if mixed {
+            eprintln!(
+                "  {:<12} {}",
+                file.language_id,
+                file.path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
     eprintln!("native:  {}", native_bin.display());
     eprintln!("node:    {} {}", node_bin, node_script.display());
 
-    let native = measure("native-lsp", &native_bin, None, &files)?;
-    let node = measure("node-lsp", Path::new(&node_bin), Some(&node_script), &files)?;
+    let native = measure("native-lsp", &native_bin, None, &files, mixed)?;
+    let node = measure(
+        "node-lsp",
+        Path::new(&node_bin),
+        Some(&node_script),
+        &files,
+        mixed,
+    )?;
 
-    print_table(&native, &node, files.len());
+    if mixed {
+        print_mixed(&native, &node);
+    } else {
+        print_table(&native, &node, files.len());
+    }
 
     if native.after_open_bytes >= node.after_open_bytes {
         eprintln!(
@@ -86,19 +123,35 @@ fn default_native_bin() -> PathBuf {
         .join("native-lsp")
 }
 
+struct OpenFile {
+    path: PathBuf,
+    language_id: String,
+}
+
+struct FileProbe {
+    name: String,
+    language_id: String,
+    symbol_count: usize,
+    hover: String,
+}
+
 struct Sample {
     idle_bytes: u64,
     after_open_bytes: u64,
     after_sleep_bytes: u64,
     hover_ms: u128,
     pid: u32,
+    interned: u64,
+    languages: Vec<String>,
+    files: Vec<FileProbe>,
 }
 
 fn measure(
     name: &str,
     program: &Path,
     script: Option<&Path>,
-    files: &[PathBuf],
+    files: &[OpenFile],
+    probe_each: bool,
 ) -> Result<Sample, Box<dyn std::error::Error>> {
     let _ = name;
     let mut cmd = Command::new(program);
@@ -133,15 +186,15 @@ fn measure(
     let idle = native_lsp::rss::rss_bytes_of(pid.to_string())
         .ok_or_else(|| format!("could not read RSS for pid {pid}"))?;
 
-    for path in files {
-        let text = std::fs::read_to_string(path)?;
-        let uri = path_uri(path);
+    for file in files {
+        let text = std::fs::read_to_string(&file.path)?;
+        let uri = path_uri(&file.path);
         client.notify(
             "textDocument/didOpen",
             json!({
                 "textDocument": {
                     "uri": uri,
-                    "languageId": "php",
+                    "languageId": file.language_id,
                     "version": 1,
                     "text": text
                 }
@@ -149,20 +202,73 @@ fn measure(
         )?;
     }
 
-    let hover_uri = path_uri(&files[0]);
-    let t0 = Instant::now();
-    let _hover = client.request(
-        "textDocument/hover",
-        json!({
-            "textDocument": { "uri": hover_uri },
-            "position": { "line": 4, "character": 6 }
-        }),
-    )?;
-    let hover_ms = t0.elapsed().as_millis();
+    let mut probes = Vec::new();
+    let mut hover_ms = 0;
+    let probe_files: Vec<&OpenFile> = if probe_each {
+        files.iter().collect()
+    } else {
+        files.iter().take(1).collect()
+    };
+
+    for file in probe_files {
+        let uri = path_uri(&file.path);
+        let symbols = client.request(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": uri } }),
+        )?;
+        let symbol_count = symbols.as_array().map(|a| a.len()).unwrap_or(0);
+        let line = symbols
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|s| s.pointer("/location/range/start/line"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let t0 = Instant::now();
+        let hover = client.request(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": 0 }
+            }),
+        )?;
+        hover_ms += t0.elapsed().as_millis();
+        let hover_text = hover
+            .pointer("/contents/value")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        probes.push(FileProbe {
+            name: file
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            language_id: file.language_id.clone(),
+            symbol_count,
+            hover: hover_text,
+        });
+    }
 
     std::thread::sleep(Duration::from_millis(80));
     let after_open = native_lsp::rss::rss_bytes_of(pid.to_string())
         .ok_or_else(|| format!("could not read RSS after open for pid {pid}"))?;
+
+    let report = client.request("nativeLsp/memoryReport", json!(null))?;
+    let interned = report.get("interned").and_then(Value::as_u64).unwrap_or(0);
+    let languages = report
+        .get("languages")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
 
     client.notify(
         "$/nativeLsp/sleep",
@@ -183,6 +289,9 @@ fn measure(
         after_sleep_bytes: after_sleep,
         hover_ms,
         pid,
+        interned,
+        languages,
+        files: probes,
     })
 }
 
@@ -212,6 +321,62 @@ fn print_table(native: &Sample, node: &Sample, files: usize) {
     println!();
 }
 
+fn print_mixed(native: &Sample, node: &Sample) {
+    println!();
+    println!(
+        "## Mixed languages ({} files, one process)",
+        native.files.len()
+    );
+    println!();
+    println!("languages: {}", native.languages.join(", "));
+    println!(
+        "interned names: native {}, node {}",
+        native.interned, node.interned
+    );
+    println!();
+    println!("| file | language | native symbols | native hover | node symbols | node hover |");
+    println!("| --- | --- | ---: | --- | ---: | --- |");
+    for (n, o) in native.files.iter().zip(node.files.iter()) {
+        println!(
+            "| `{}` | {} | {} | {} | {} | {} |",
+            n.name,
+            n.language_id,
+            n.symbol_count,
+            md_cell(&n.hover),
+            o.symbol_count,
+            md_cell(&o.hover)
+        );
+    }
+    println!();
+    println!("| stage | native-lsp | node-lsp | delta |");
+    println!("| --- | ---: | ---: | ---: |");
+    row("idle after initialize", native.idle_bytes, node.idle_bytes);
+    row(
+        "after didOpen 10 languages + hover",
+        native.after_open_bytes,
+        node.after_open_bytes,
+    );
+    row(
+        "after park sleep",
+        native.after_sleep_bytes,
+        node.after_sleep_bytes,
+    );
+    println!();
+    println!(
+        "hover latency (all files): native {} ms, node {} ms",
+        native.hover_ms, node.hover_ms
+    );
+    println!("pids: native {}, node {}", native.pid, node.pid);
+    println!();
+}
+
+fn md_cell(s: &str) -> String {
+    if s.is_empty() {
+        return "_none_".into();
+    }
+    format!("`{}`", s.replace('|', "\\|").replace('`', "'"))
+}
+
 fn row(stage: &str, native: u64, node: u64) {
     let delta = if node >= native {
         format!("native saves {}", native_lsp::rss::format_mb(node - native))
@@ -237,15 +402,47 @@ fn path_uri(path: &Path) -> String {
     )
 }
 
-fn php_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+fn php_files(dir: &Path) -> std::io::Result<Vec<OpenFile>> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.extension().and_then(|s| s.to_str()) == Some("php") {
-            files.push(path);
+            files.push(OpenFile {
+                path,
+                language_id: "php".into(),
+            });
         }
     }
-    files.sort();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+fn mixed_files() -> Result<Vec<OpenFile>, Box<dyn std::error::Error>> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/mixed");
+    if !dir.is_dir() {
+        return Err(format!("missing mixed fixtures at {}", dir.display()).into());
+    }
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let language_id = native_lsp::lang::infer_from_uri(&format!(
+            "file:///{}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        files.push(OpenFile { path, language_id });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    if files.len() != 10 {
+        return Err(format!(
+            "expected 10 mixed files, found {} in {}",
+            files.len(),
+            dir.display()
+        )
+        .into());
+    }
     Ok(files)
 }
 

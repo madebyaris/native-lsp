@@ -1,7 +1,9 @@
 pub mod host;
 pub mod intern;
+pub mod lang;
 pub mod php;
 pub mod rpc;
 pub mod rss;
 pub mod server;
+pub mod symbol;
 pub mod workspace;

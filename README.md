@@ -10,9 +10,9 @@ A **native Language Server Protocol (LSP)** server: one static binary, stdio JSO
 - [x] Host profiles + IDE-driven sleep/wake
 - [x] Compact intern snapshot on disk
 - [x] PHP / WordPress-shaped symbols (`class`, `function`, `add_action` / `add_filter`)
+- [x] Ten-language scanners in one process (PHP, JS, TS, HTML, CSS, JSON, YAML, SQL, Python, Rust)
 - [x] RSS comparison vs a Node.js LSP with the same protocol
 - [ ] tree-sitter PHP CST
-- [ ] HTML / CSS / JSON in the same process
 
 ## Run the server
 
@@ -40,6 +40,8 @@ Same fixture, same LSP messages, `/proc/<pid>/status` `VmRSS`:
 cargo build --release --bin native-lsp --bin compare-rss
 ./target/release/compare-rss
 # optional: COMPARE_FILES=200 ./target/release/compare-rss
+# ten files, ten languages, one process:
+COMPARE_MODE=mixed ./target/release/compare-rss
 ```
 
 Success bar from research: native idle/open RSS **under 80 MB**.

@@ -1,0 +1,23 @@
+/* Mixed-language fixture: theme CSS. */
+.hero {
+  padding: 2rem;
+  color: #111;
+}
+
+#nav {
+  display: flex;
+  gap: 1rem;
+}
+
+.cart {
+  border: 1px solid #ddd;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

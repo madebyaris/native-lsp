@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use crate::intern::Interner;
-use crate::php::{self, PhpSymbol};
+use crate::lang;
+use crate::php;
+use crate::symbol::Symbol;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
@@ -15,14 +17,15 @@ pub enum Visibility {
 #[derive(Debug)]
 pub struct Document {
     pub uri: String,
+    pub language_id: String,
     pub text: String,
-    pub symbols: Option<Vec<PhpSymbol>>,
+    pub symbols: Option<Vec<Symbol>>,
     pub visibility: Visibility,
 }
 
 impl Document {
     pub fn parse(&mut self, intern: &mut Interner) {
-        self.symbols = Some(php::extract(&self.text, intern));
+        self.symbols = Some(lang::extract(&self.language_id, &self.text, intern));
     }
 
     pub fn nap(&mut self) {
@@ -37,9 +40,11 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn open(&mut self, uri: String, text: String) {
+    pub fn open(&mut self, uri: String, language_id: String, text: String) {
+        let language_id = lang::normalize_language_id(&language_id, &uri);
         let mut doc = Document {
             uri: uri.clone(),
+            language_id,
             text,
             symbols: None,
             visibility: Visibility::Active,
@@ -104,6 +109,17 @@ impl Workspace {
         self.docs.values().filter(|d| d.symbols.is_some()).count()
     }
 
+    pub fn language_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.docs.values().map(|d| d.language_id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    pub fn has_php(&self) -> bool {
+        self.docs.values().any(|d| d.language_id == "php")
+    }
+
     pub fn all_symbol_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         for doc in self.docs.values() {
@@ -112,7 +128,7 @@ impl Workspace {
                     if let Some(n) = self.intern.get(s.name_id) {
                         names.push(n.to_string());
                     }
-                    if let Some(id) = s.hook_id {
+                    if let Some(id) = s.extra_id {
                         if let Some(n) = self.intern.get(id) {
                             names.push(n.to_string());
                         }
@@ -120,8 +136,10 @@ impl Workspace {
                 }
             }
         }
-        for stub in php::WP_STUBS {
-            names.push((*stub).to_string());
+        if self.has_php() {
+            for stub in php::WP_STUBS {
+                names.push((*stub).to_string());
+            }
         }
         names.sort();
         names.dedup();

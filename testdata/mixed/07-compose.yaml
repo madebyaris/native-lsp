@@ -1,0 +1,13 @@
+# Mixed-language fixture: compose-shaped YAML.
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: mixed
+
+volumes:
+  pgdata:

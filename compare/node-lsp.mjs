@@ -9,7 +9,21 @@ import { Buffer } from "node:buffer";
 const docs = new Map();
 let internCount = 0;
 
-function extract(text) {
+function identAt(s) {
+  const m = s.trimStart().match(/^[A-Za-z_\\][A-Za-z0-9_\\]*/);
+  return m ? m[0] : null;
+}
+
+function firstQuoted(s) {
+  const t = s.trimStart();
+  const q = t[0];
+  if (q !== "'" && q !== '"') return null;
+  const end = t.indexOf(q, 1);
+  if (end < 0) return null;
+  return t.slice(1, end);
+}
+
+function extractPhp(text) {
   const symbols = [];
   const lines = text.split(/\n/);
   for (let i = 0; i < lines.length; i++) {
@@ -27,8 +41,238 @@ function extract(text) {
     const hookRe = /\b(add_action|add_filter)\(\s*(['"])([^'"]+)\2/g;
     let m;
     while ((m = hookRe.exec(line))) {
-      symbols.push({ name: m[1], kind: "hook", line: i, hook: m[3] });
+      symbols.push({ name: m[1], kind: "hook", line: i, extra: m[3] });
     }
+  }
+  return symbols;
+}
+
+function stripExport(s) {
+  return s.replace(/^export\s+(default\s+)?/, "");
+}
+
+function extractJs(text, typescript) {
+  const symbols = [];
+  const lines = text.split(/\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trimStart();
+    if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) {
+      continue;
+    }
+    const rest = stripExport(trimmed);
+    if (typescript) {
+      for (const kw of ["interface ", "type ", "enum "]) {
+        if (rest.startsWith(kw)) {
+          const name = identAt(rest.slice(kw.length));
+          if (name) symbols.push({ name, kind: "type", line: i });
+        }
+      }
+    }
+    if (rest.startsWith("class ")) {
+      const name = identAt(rest.slice(6));
+      if (name) symbols.push({ name, kind: "class", line: i });
+    }
+    const fn = rest.replace(/^async\s+/, "");
+    if (fn.startsWith("function ")) {
+      const name = identAt(fn.slice(9));
+      if (name) symbols.push({ name, kind: "function", line: i });
+    }
+    const constMatch = rest.match(/^(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(async|function|\()/);
+    if (constMatch) {
+      symbols.push({ name: constMatch[1], kind: "function", line: i });
+    }
+  }
+  return symbols;
+}
+
+function extractHtml(text) {
+  const symbols = [];
+  const lines = text.split(/\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const idRe = /\bid=["']([^"']+)["']/g;
+    let m;
+    while ((m = idRe.exec(line))) {
+      symbols.push({ name: m[1], kind: "tag", line: i, extra: "id" });
+    }
+    const classRe = /\bclass=["']([^"']+)["']/g;
+    while ((m = classRe.exec(line))) {
+      for (const c of m[1].split(/\s+/).filter(Boolean)) {
+        symbols.push({ name: c, kind: "rule", line: i, extra: "class" });
+      }
+    }
+    const tagRe = /<([a-zA-Z][a-zA-Z0-9-]*)/g;
+    while ((m = tagRe.exec(line))) {
+      if (m[1].includes("-")) {
+        symbols.push({ name: m[1], kind: "tag", line: i });
+      }
+    }
+  }
+  return symbols;
+}
+
+function extractCss(text) {
+  const symbols = [];
+  const lines = text.split(/\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed || trimmed.startsWith("/*") || trimmed.startsWith("*")) continue;
+    if (trimmed.startsWith("@keyframes ")) {
+      const name = trimmed.slice(11).split(/[\s{]/)[0];
+      if (name) symbols.push({ name, kind: "rule", line: i });
+      continue;
+    }
+    if (trimmed.startsWith("@")) continue;
+    const before = trimmed.split("{")[0];
+    for (const sel of before.split(",")) {
+      const t = sel.trim();
+      const name = t.replace(/^[.#]/, "").split(/[\s:>+~[({]/)[0];
+      if (name) symbols.push({ name, kind: "rule", line: i });
+    }
+  }
+  return symbols;
+}
+
+function extractJson(text) {
+  const symbols = [];
+  const lines = text.split(/\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].trimStart().match(/^"([^"]+)"\s*:/);
+    if (m) symbols.push({ name: m[1], kind: "key", line: i });
+  }
+  return symbols;
+}
+
+function extractYaml(text) {
+  const symbols = [];
+  const lines = text.split(/\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("#") || !line.trim() || line.trim() === "---") continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent > 2) continue;
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith("-")) continue;
+    const colon = trimmed.indexOf(":");
+    if (colon <= 0) continue;
+    const key = trimmed.slice(0, colon).trim();
+    if (key && !key.includes(" ")) {
+      symbols.push({ name: key, kind: "key", line: i });
+    }
+  }
+  return symbols;
+}
+
+function extractSql(text) {
+  const symbols = [];
+  const lines = text.split(/\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trimStart();
+    if (trimmed.startsWith("--")) continue;
+    const upper = trimmed.toUpperCase();
+    const kws = [
+      "CREATE TABLE ",
+      "CREATE VIEW ",
+      "CREATE INDEX ",
+      "CREATE UNIQUE INDEX ",
+      "CREATE FUNCTION ",
+      "CREATE PROCEDURE ",
+    ];
+    for (const kw of kws) {
+      const idx = upper.indexOf(kw);
+      if (idx < 0) continue;
+      let after = trimmed.slice(idx + kw.length).trimStart();
+      after = after.replace(/^IF NOT EXISTS\s+/i, "");
+      const name = firstQuoted(after) || identAt(after);
+      if (name) symbols.push({ name, kind: "table", line: i });
+      break;
+    }
+  }
+  return symbols;
+}
+
+function extractPython(text) {
+  const symbols = [];
+  const lines = text.split(/\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trimStart();
+    if (trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("class ")) {
+      const name = identAt(trimmed.slice(6));
+      if (name) symbols.push({ name, kind: "class", line: i });
+    }
+    const def = trimmed.replace(/^async\s+/, "");
+    if (def.startsWith("def ")) {
+      const name = identAt(def.slice(4));
+      if (name) symbols.push({ name, kind: "function", line: i });
+    }
+  }
+  return symbols;
+}
+
+function extractRust(text) {
+  const symbols = [];
+  const lines = text.split(/\n/);
+  for (let i = 0; i < lines.length; i++) {
+    let rest = lines[i].trimStart();
+    if (rest.startsWith("//")) continue;
+    rest = rest.replace(/^pub(\([^)]+\))?\s+/, "").replace(/^async\s+/, "");
+    const kinds = [
+      ["fn ", "function"],
+      ["struct ", "class"],
+      ["enum ", "type"],
+      ["trait ", "type"],
+      ["mod ", "module"],
+      ["type ", "type"],
+      ["const ", "variable"],
+      ["impl ", "class"],
+      ["macro_rules! ", "function"],
+    ];
+    for (const [kw, kind] of kinds) {
+      if (rest.startsWith(kw)) {
+        const name = identAt(rest.slice(kw.length));
+        if (name) symbols.push({ name, kind, line: i });
+      }
+    }
+  }
+  return symbols;
+}
+
+function extract(text, languageId) {
+  let symbols;
+  switch (languageId) {
+    case "php":
+      symbols = extractPhp(text);
+      break;
+    case "javascript":
+      symbols = extractJs(text, false);
+      break;
+    case "typescript":
+      symbols = extractJs(text, true);
+      break;
+    case "html":
+      symbols = extractHtml(text);
+      break;
+    case "css":
+      symbols = extractCss(text);
+      break;
+    case "json":
+      symbols = extractJson(text);
+      break;
+    case "yaml":
+      symbols = extractYaml(text);
+      break;
+    case "sql":
+      symbols = extractSql(text);
+      break;
+    case "python":
+      symbols = extractPython(text);
+      break;
+    case "rust":
+      symbols = extractRust(text);
+      break;
+    default:
+      symbols = extractPhp(text);
   }
   internCount += symbols.length;
   return symbols;
@@ -53,6 +297,33 @@ function respond(id, result) {
   send({ jsonrpc: "2.0", id, result });
 }
 
+function lspKind(kind) {
+  switch (kind) {
+    case "class":
+      return 5;
+    case "function":
+      return 12;
+    case "hook":
+      return 24;
+    case "type":
+      return 11;
+    case "variable":
+      return 13;
+    case "tag":
+      return 5;
+    case "rule":
+      return 7;
+    case "key":
+      return 8;
+    case "table":
+      return 23;
+    case "module":
+      return 2;
+    default:
+      return 13;
+  }
+}
+
 function handleRequest(msg) {
   switch (msg.method) {
     case "initialize":
@@ -73,14 +344,16 @@ function handleRequest(msg) {
       const uri = msg.params.textDocument.uri;
       const line = msg.params.position.line;
       const doc = docs.get(uri);
-      const sym = doc?.symbols?.find((s) => s.line === line);
+      const sym = [...(doc?.symbols || [])].reverse().find((s) => s.line === line);
+      const label = sym?.kind || "";
+      const display = label === "function" ? `${sym.name}()` : sym?.name;
       respond(
         msg.id,
         sym
           ? {
               contents: {
                 kind: "markdown",
-                value: `**${sym.kind}** \`${sym.name}\``,
+                value: `**${doc.languageId} ${label}** \`${display}\``,
               },
             }
           : null,
@@ -107,7 +380,8 @@ function handleRequest(msg) {
         msg.id,
         (doc?.symbols || []).map((s) => ({
           name: s.name,
-          kind: s.kind === "class" ? 5 : 12,
+          kind: lspKind(s.kind),
+          detail: doc.languageId,
           location: {
             uri: msg.params.textDocument.uri,
             range: {
@@ -125,6 +399,7 @@ function handleRequest(msg) {
         interned: internCount,
         open_docs: docs.size,
         parsed_docs: [...docs.values()].filter((d) => d.symbols).length,
+        languages: [...new Set([...docs.values()].map((d) => d.languageId))].sort(),
         host: { profile: "node", io: "heap", os: process.platform },
       });
       return;
@@ -147,8 +422,9 @@ function handleNotification(msg) {
       const td = msg.params.textDocument;
       docs.set(td.uri, {
         text: td.text,
+        languageId: td.languageId || "php",
         lines: td.text.split(/\n/),
-        symbols: extract(td.text),
+        symbols: extract(td.text, td.languageId || "php"),
       });
       return;
     }
@@ -156,7 +432,14 @@ function handleNotification(msg) {
       const uri = msg.params.textDocument.uri;
       const text = msg.params.contentChanges.at(-1)?.text;
       if (text == null) return;
-      docs.set(uri, { text, lines: text.split(/\n/), symbols: extract(text) });
+      const prev = docs.get(uri);
+      const languageId = prev?.languageId || "php";
+      docs.set(uri, {
+        text,
+        languageId,
+        lines: text.split(/\n/),
+        symbols: extract(text, languageId),
+      });
       return;
     }
     case "textDocument/didClose":
@@ -169,7 +452,7 @@ function handleNotification(msg) {
       return;
     case "$/nativeLsp/wake":
       for (const doc of docs.values()) {
-        if (!doc.symbols) doc.symbols = extract(doc.text);
+        if (!doc.symbols) doc.symbols = extract(doc.text, doc.languageId || "php");
       }
       return;
     default:

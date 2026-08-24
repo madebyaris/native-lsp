@@ -6,9 +6,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::host::{self, HostInfo};
-use crate::php::{self, PhpKind};
+use crate::php;
 use crate::rpc;
 use crate::rss;
+use crate::symbol::SymbolKind;
 use crate::workspace::{Visibility, Workspace};
 
 pub fn run() -> Result<(), Box<dyn Error + Sync + Send>> {
@@ -109,7 +110,11 @@ fn handle_notification(method: &str, params: Value, ws: &mut Workspace) {
             if let Some(td) = params.get("textDocument") {
                 let uri = td.get("uri").and_then(Value::as_str).unwrap_or_default();
                 let text = td.get("text").and_then(Value::as_str).unwrap_or_default();
-                ws.open(uri.to_string(), text.to_string());
+                let language_id = td
+                    .get("languageId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                ws.open(uri.to_string(), language_id.to_string(), text.to_string());
             }
         }
         "textDocument/didChange" => {
@@ -169,6 +174,7 @@ fn memory_report(ws: &Workspace, host: &HostInfo) -> Value {
         "interned": ws.intern.len(),
         "open_docs": ws.open_count(),
         "parsed_docs": ws.parsed_count(),
+        "languages": ws.language_ids(),
         "host": host,
     })
 }
@@ -178,15 +184,20 @@ fn hover(ws: &Workspace, params: &Value) -> Option<Value> {
     let line = params.pointer("/position/line")?.as_u64()? as u32;
     let doc = ws.get(uri)?;
     let symbols = doc.symbols.as_ref()?;
-    let sym = php::symbol_at_line(symbols, line)?;
+    let sym = crate::symbol::symbol_at_line(symbols, line)?;
     let name = ws.intern.get(sym.name_id)?;
-    let mut md = match sym.kind {
-        PhpKind::Class => format!("**class** `{name}`"),
-        PhpKind::Function => format!("**function** `{name}()`"),
-        PhpKind::Hook => format!("**hook** `{name}`"),
+    let display = if sym.kind == SymbolKind::Function {
+        format!("{name}()")
+    } else {
+        name.to_string()
     };
-    if let Some(hook) = sym.hook_id.and_then(|id| ws.intern.get(id)) {
-        md.push_str(&format!("\n\nWordPress hook: `{hook}`"));
+    let mut md = format!("**{} {}** `{display}`", doc.language_id, sym.kind.label());
+    if let Some(extra) = sym.extra_id.and_then(|id| ws.intern.get(id)) {
+        if sym.kind == SymbolKind::Hook {
+            md.push_str(&format!("\n\nWordPress hook: `{extra}`"));
+        } else {
+            md.push_str(&format!("\n\n{extra}"));
+        }
     }
     Some(json!({
         "contents": { "kind": "markdown", "value": md }
@@ -222,14 +233,10 @@ fn document_symbols(ws: &Workspace, params: &Value) -> Value {
         .iter()
         .filter_map(|s| {
             let name = ws.intern.get(s.name_id)?;
-            let kind = match s.kind {
-                PhpKind::Class => 5,
-                PhpKind::Function => 12,
-                PhpKind::Hook => 24,
-            };
             Some(json!({
                 "name": name,
-                "kind": kind,
+                "kind": s.kind.lsp_kind(),
+                "detail": doc.language_id,
                 "location": {
                     "uri": uri,
                     "range": {
@@ -237,7 +244,7 @@ fn document_symbols(ws: &Workspace, params: &Value) -> Value {
                         "end": { "line": s.line, "character": s.character + 1 }
                     }
                 },
-                "containerName": s.hook_id.and_then(|id| ws.intern.get(id))
+                "containerName": s.extra_id.and_then(|id| ws.intern.get(id))
             }))
         })
         .collect();
