@@ -14,7 +14,7 @@ A **native Language Server Protocol (LSP)** server: one static binary, stdio JSO
 - [x] RSS comparison vs a Node.js LSP with the same protocol
 - [x] Tiny native workbench (`native-ide`) so the editor stays constant
 - [x] Host A/B in Neovim, Emacs, Helix, and VS Code (`compare-hosts`)
-- [x] tree-sitter PHP CST on **open files only** (nap drops the tree)
+- [x] tree-sitter CST for common languages on the **active tab only** (nap drops the tree)
 
 ## Run the server
 
@@ -44,6 +44,8 @@ cargo build --release --bin native-lsp --bin compare-rss
 # optional: COMPARE_FILES=200 ./target/release/compare-rss
 # ten files, ten languages, one process:
 COMPARE_MODE=mixed ./target/release/compare-rss
+# one process, load grammars as tabs open, keep one CST:
+COMPARE_MODE=tabs ./target/release/compare-rss
 ```
 
 Success bar from research: native idle/open RSS **under 80 MB**.
@@ -99,22 +101,21 @@ workspace goto-def index, no diagnostics.
 
 | Language | Parser | What works |
 | --- | --- | --- |
-| PHP | tree-sitter CST (line-scan fallback) | class, method, function, `add_action` / `add_filter` |
-| JavaScript | line-scan | class, function, const/let/var fn |
-| TypeScript | line-scan | JS plus interface, type, enum |
-| HTML | line-scan | id, class, custom elements |
-| CSS | line-scan | selectors, `@keyframes` |
-| JSON | line-scan | object keys |
-| YAML | line-scan | keys at indent 0–2 |
-| SQL | line-scan | `CREATE TABLE/VIEW/INDEX/FUNCTION` |
-| Python | line-scan | class, def |
-| Rust | line-scan | fn, struct, enum, impl, trait, mod, const |
+| PHP | tree-sitter (line-scan fallback) | class, method, function, `add_action` / `add_filter` |
+| JavaScript | tree-sitter | class, function, method, const/let/var fn |
+| TypeScript | tree-sitter | JS plus interface, type, enum |
+| HTML | tree-sitter | id, class, custom elements |
+| CSS | tree-sitter | selectors, `@keyframes` |
+| JSON | tree-sitter | object keys |
+| YAML | tree-sitter | mapping keys |
+| SQL | line-scan | `CREATE TABLE/VIEW/INDEX/FUNCTION` (no 0.22 grammar crate) |
+| Python | tree-sitter | class, def |
+| Rust | tree-sitter | fn, struct, enum, impl, trait, mod, const |
 | Go, Java, C/C++, Ruby, Vue, Markdown, Shell, … | none | plaintext; empty symbols |
 
-Tree-sitter is **open-file only**. `$/nativeLsp/sleep` / hidden-tab nap drops
-the CST and the symbol vec; buffer text stays until `didClose`. Extra grammars
-(JS/HTML/CSS/JSON) would raise compile time and binary size; they are not
-loaded yet.
+One binary, **lazy grammars**, **one CST**. `didOpen` makes that tab Active and naps the previous one. `$/nativeLsp/documentVisibility` does the same on a real tab switch. Hover of a hidden tab re-parses symbols without keeping a second tree. `park` drops CSTs and parser instances (grammar pages may stay mapped).
+
+This is still not a typechecker. SQL stays line-scan because there is no tree-sitter 0.22-compatible crate. Go/Java/C and friends are not in the binary yet — adding them is more compile time and more file-backed grammar pages, not more Node processes.
 
 ## License
 

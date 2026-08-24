@@ -1,4 +1,4 @@
-//! Language-id dispatch. Non-PHP languages are line-oriented extracts, not CSTs.
+//! Language-id dispatch. Line-scan is the fallback when a grammar is missing.
 
 use crate::intern::Interner;
 use crate::php;
@@ -16,51 +16,51 @@ pub const LANGUAGE_SUPPORT: &[LanguageSupport] = &[
     LanguageSupport {
         id: "php",
         parser: "tree-sitter",
-        symbols: "class, method, function, WordPress add_action/add_filter (line-scan fallback)",
+        symbols: "class, method, function, WordPress add_action/add_filter",
     },
     LanguageSupport {
         id: "javascript",
-        parser: "line-scan",
-        symbols: "class, function, const/let/var arrow or function",
+        parser: "tree-sitter",
+        symbols: "class, function, method, const/let/var arrow or function",
     },
     LanguageSupport {
         id: "typescript",
-        parser: "line-scan",
+        parser: "tree-sitter",
         symbols: "JS plus interface, type, enum — not a typechecker",
     },
     LanguageSupport {
         id: "html",
-        parser: "line-scan",
+        parser: "tree-sitter",
         symbols: "id, class, custom elements",
     },
     LanguageSupport {
         id: "css",
-        parser: "line-scan",
+        parser: "tree-sitter",
         symbols: "selectors, @keyframes",
     },
     LanguageSupport {
         id: "json",
-        parser: "line-scan",
+        parser: "tree-sitter",
         symbols: "object keys",
     },
     LanguageSupport {
         id: "yaml",
-        parser: "line-scan",
-        symbols: "keys at indent 0–2",
+        parser: "tree-sitter",
+        symbols: "mapping keys",
     },
     LanguageSupport {
         id: "sql",
         parser: "line-scan",
-        symbols: "CREATE TABLE/VIEW/INDEX/FUNCTION/PROCEDURE",
+        symbols: "CREATE TABLE/VIEW/INDEX/FUNCTION/PROCEDURE (no 0.22 grammar)",
     },
     LanguageSupport {
         id: "python",
-        parser: "line-scan",
+        parser: "tree-sitter",
         symbols: "class, def, async def",
     },
     LanguageSupport {
         id: "rust",
-        parser: "line-scan",
+        parser: "tree-sitter",
         symbols: "fn, struct, enum, impl, trait, mod, const",
     },
 ];
@@ -687,7 +687,11 @@ mod tests {
             "rust",
         ]);
         assert_eq!(LANGUAGE_SUPPORT[0].parser, "tree-sitter");
-        assert!(LANGUAGE_SUPPORT[1..].iter().all(|l| l.parser == "line-scan"));
+        assert_eq!(LANGUAGE_SUPPORT.iter().find(|l| l.id == "sql").unwrap().parser, "line-scan");
+        assert!(LANGUAGE_SUPPORT
+            .iter()
+            .filter(|l| l.id != "sql")
+            .all(|l| l.parser == "tree-sitter"));
         assert!(UNSUPPORTED_COMMON.contains(&"go"));
     }
 

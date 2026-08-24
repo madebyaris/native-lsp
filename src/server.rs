@@ -177,13 +177,15 @@ fn memory_report(ws: &Workspace, host: &HostInfo) -> Value {
         "parsed_docs": ws.parsed_count(),
         "cst_docs": ws.cst_count(),
         "parsers": ws.parser_kinds(),
+        "grammars_loaded": ws.grammars_loaded(),
         "languages": ws.language_ids(),
         "host": host,
     })
 }
 
-fn hover(ws: &Workspace, params: &Value) -> Option<Value> {
+fn hover(ws: &mut Workspace, params: &Value) -> Option<Value> {
     let uri = params.pointer("/textDocument/uri")?.as_str()?;
+    ws.ensure_parsed(uri);
     let line = params.pointer("/position/line")?.as_u64()? as u32;
     let doc = ws.get(uri)?;
     let symbols = doc.symbols.as_ref()?;
@@ -222,10 +224,11 @@ fn completion(ws: &Workspace) -> Value {
     json!(items)
 }
 
-fn document_symbols(ws: &Workspace, params: &Value) -> Value {
+fn document_symbols(ws: &mut Workspace, params: &Value) -> Value {
     let Some(uri) = params.pointer("/textDocument/uri").and_then(Value::as_str) else {
         return json!([]);
     };
+    ws.ensure_parsed(uri);
     let Some(doc) = ws.get(uri) else {
         return json!([]);
     };
