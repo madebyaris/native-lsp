@@ -15,6 +15,7 @@ A **native Language Server Protocol (LSP)** server: one static binary, stdio JSO
 - [x] Tiny native workbench (`native-ide`) so the editor stays constant
 - [x] Host A/B in Neovim, Emacs, Helix, and VS Code (`compare-hosts`)
 - [x] tree-sitter CST for common languages on the **active tab only** (nap drops the tree)
+- [x] Production-style VS Code client vs stock html/css/json/tsserver (`COMPARE_PROFILE=real`)
 
 ## Run the server
 
@@ -55,6 +56,22 @@ files) / **~3.6 MB** (200 PHP files) vs Node **~47–54 MB**; visiting all
 nine tree-sitter grammars in one process is **~6.4 MB vs ~46 MB**. Full
 table: [`docs/COMPARISON.md`](docs/COMPARISON.md).
 
+Real VS Code, WordPress-shaped plugin (`testdata/wp-plugin/`), same
+`executeHoverProvider` path the UI uses:
+
+```bash
+COMPARE_PROFILE=real ./target/release/compare-hosts
+```
+
+| stack | language servers | files with hover |
+| --- | ---: | ---: |
+| vscode + native-lsp | **5.59 MB** (1 process) | 12 / 12 |
+| vscode + stock html/css/json/tsserver | **747 MB** (5 Node processes) | 4 / 12 |
+
+Stock hover works for JS, TS, CSS, and JSON. PHP, YAML, SQL, and HTML have
+no built-in language server (PHP completions are word lists). Native-lsp is
+still symbols/hover/completion from a CST, not Intelephense or tsserver.
+
 ## Fair comparison: same IDE, swap the LSP
 
 Headless `compare-rss` is already a fair **LSP** A/B (same messages, measure
@@ -76,6 +93,12 @@ COMPARE_MODE=ide ./target/release/compare-rss
 `compare-hosts` drives Neovim, Emacs/Eglot, Helix, and VS Code with the same
 mixed files. The language server stays **~3 MB native vs ~46 MB Node** in every
 host; VS Code’s Electron tree is ~1.7 GB so the editor dominates.
+
+Production-like A/B (open a plugin folder, probe through the editor APIs):
+
+```bash
+COMPARE_PROFILE=real ./target/release/compare-hosts
+```
 
 A homemade IDE vs Cursor + Intelephense would mix editor RAM, extensions, and
 analysis depth. That is a product comparison, not an LSP comparison.

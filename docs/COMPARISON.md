@@ -69,6 +69,78 @@ because the trees do not.
 
 Replay: `COMPARE_MODE=tabs ./target/release/compare-rss`
 
+## Real VS Code vs stock language servers
+
+This is the production-shaped run: VS Code 1.134 opens `testdata/wp-plugin/`
+(a WordPress-shaped storefront plugin: PHP classes, a JS widget, a TS checkout
+client, HTML/CSS, `package.json`, Compose YAML, SQL). Hover, document symbols,
+and completion go through `vscode.executeHoverProvider` /
+`executeDocumentSymbolProvider` / `executeCompletionItemProvider` — the same
+commands the workbench uses when you hover a symbol.
+
+- **native:** disable `html` / `css` / `json` / `typescript` / `php` language
+  features so only `native-lsp` answers.
+- **stock:** those built-in Node servers (`htmlServerMain`, `cssServerMain`,
+  `jsonServerMain`, plus two `tsserver` processes). The native-lsp client is
+  off; the extension still loads so the probe script can run.
+
+Replay: `COMPARE_PROFILE=real ./target/release/compare-hosts`
+
+| stack | IDE | language servers | total | files with hover |
+| --- | ---: | ---: | ---: | ---: |
+| vscode + native-lsp | 2078.52 MB | **5.59 MB** | 2084.11 MB | **12 / 12** |
+| vscode + stock | 2023.27 MB | **746.84 MB** | 2770.10 MB | 4 / 12 |
+
+The editor is still ~2 GB of Electron either way. The language-server gap is
+**one 5.6 MB native process vs five Node servers totaling ~747 MB**.
+
+### Language servers in the VS Code tree
+
+**native**
+
+| language server | RSS |
+| --- | ---: |
+| native-lsp | **5.59 MB** |
+| **sum** | **5.59 MB** |
+
+**stock**
+
+| language server | RSS |
+| --- | ---: |
+| tsserver | 202.14 MB |
+| tsserver (syntax) | 171.14 MB |
+| html-language-features | 142.25 MB |
+| json-language-features | 126.68 MB |
+| css-language-features | 104.63 MB |
+| **sum** | **746.84 MB** |
+
+### Probes (same files, same VS Code commands)
+
+| file | language | native symbols | native hover | stock symbols | stock hover |
+| --- | --- | ---: | --- | ---: | --- |
+| `admin/class-settings.php` | php | 8 | php class Native_Shop_Settings | 0 | _none_ |
+| `assets/css/storefront.css` | css | 4 | css rule hero | 4 | `<element class="hero">` |
+| `assets/js/cart-widget.js` | javascript | 5 | javascript class CartWidget | 3 | `class CartWidget` |
+| `assets/ts/checkout-api.ts` | typescript | 7 | typescript type CartId | 5 | `type CartId = string` |
+| `docker-compose.yaml` | yaml | 10 | yaml key services | 0 | _none_ |
+| `includes/class-cart.php` | php | 5 | php class Native_Shop_Cart | 0 | _none_ |
+| `includes/class-checkout.php` | php | 5 | php class Native_Shop_Checkout | 0 | _none_ |
+| `includes/class-plugin.php` | php | 8 | php class Native_Shop_Plugin | 0 | _none_ |
+| `native-shop.php` | php | 2 | php function native_shop_boot() | 0 | _none_ |
+| `package.json` | json | 6 | json key name | 4 | The name of the package. |
+| `schema.sql` | sql | 3 | sql table native_shop_orders | 0 | _none_ |
+| `templates/cart.html` | html | 7 | html tag hero | 1 | _none_ |
+
+Stock JS/TS/CSS/JSON are the real VS Code language servers, and they do
+answer hover once tsserver finishes loading. Stock PHP is not Intelephense —
+it is VS Code's word-based PHP completions (~1600 items, no symbols). YAML
+and SQL have no built-in server. HTML-language-features was running (142 MB)
+but `executeHoverProvider` on this template did not return a hover.
+
+native-lsp is still **not** a typechecker. It is one process covering the
+languages a WordPress plugin actually contains, under the 80 MB bar, wired
+like a production LSP client (`editors/vscode/`).
+
 ## Mixed languages (10 files, one process)
 
 `COMPARE_MODE=mixed` opens `testdata/mixed/` — PHP, JavaScript, TypeScript, HTML,
