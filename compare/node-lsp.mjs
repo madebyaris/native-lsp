@@ -447,6 +447,18 @@ function handleNotification(msg) {
     case "textDocument/didClose":
       docs.delete(msg.params.textDocument.uri);
       return;
+    case "$/nativeLsp/documentVisibility": {
+      const uri = msg.params?.uri;
+      const state = msg.params?.state;
+      const doc = docs.get(uri);
+      if (!doc) return;
+      if (state === "hidden") {
+        doc.symbols = null;
+      } else if (!doc.symbols) {
+        doc.symbols = extract(doc.text, doc.languageId || "php");
+      }
+      return;
+    }
     case "$/nativeLsp/sleep":
       for (const doc of docs.values()) {
         doc.symbols = null;

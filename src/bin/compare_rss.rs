@@ -1,11 +1,14 @@
 //! Compare native-lsp RSS against a Node.js LSP with the same protocol surface.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, ChildStdout, Command, Stdio};
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+use native_lsp::client::{self, LspClient};
+use native_lsp::fixture::{self, OpenFile};
+use native_lsp::ide::IdeReport;
 
 fn main() {
     if let Err(err) = run() {
@@ -15,21 +18,19 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mixed = std::env::var("COMPARE_MODE")
-        .map(|s| s.eq_ignore_ascii_case("mixed"))
-        .unwrap_or(false);
+    let mode = std::env::var("COMPARE_MODE").unwrap_or_default();
+    if mode.eq_ignore_ascii_case("ide") {
+        return run_ide();
+    }
+    let mixed = mode.eq_ignore_ascii_case("mixed");
     let file_count: usize = std::env::var("COMPARE_FILES")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(80);
 
-    let native_bin = std::env::var("NATIVE_LSP_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| default_native_bin());
-    let node_bin = std::env::var("NODE_BIN").unwrap_or_else(|_| "node".into());
-    let node_script = std::env::var("NODE_LSP_SCRIPT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("compare/node-lsp.mjs"));
+    let native_bin = fixture::default_native_lsp();
+    let node_bin = fixture::default_node_bin();
+    let node_script = fixture::default_node_script();
 
     if !native_bin.exists() {
         return Err(format!(
@@ -43,11 +44,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let files = if mixed {
-        mixed_files()?
+        fixture::mixed_files()?
     } else {
         let fixture_dir = std::env::temp_dir().join("native-lsp-compare-fixture");
-        write_fixture(&fixture_dir, file_count)?;
-        php_files(&fixture_dir)?
+        fixture::write_php_fixtures(&fixture_dir, file_count)?;
+        fixture::php_files(&fixture_dir)?
     };
 
     if files.is_empty() {
@@ -111,21 +112,110 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn default_native_bin() -> PathBuf {
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join(profile)
-        .join("native-lsp")
+fn run_ide() -> Result<(), Box<dyn std::error::Error>> {
+    let ide_bin = fixture::default_native_ide();
+    if !ide_bin.exists() {
+        return Err(format!(
+            "native-ide not found at {}. Build with `cargo build --release --bin native-ide`.",
+            ide_bin.display()
+        )
+        .into());
+    }
+    eprintln!("ide:     {}", ide_bin.display());
+    eprintln!("native:  {}", fixture::default_native_lsp().display());
+    eprintln!(
+        "node:    {} {}",
+        fixture::default_node_bin(),
+        fixture::default_node_script().display()
+    );
+
+    let native = spawn_ide_once(&ide_bin, "native")?;
+    let node = spawn_ide_once(&ide_bin, "node")?;
+    print_ide_table(&native, &node);
+
+    if native.after_tabs_lsp_bytes >= node.after_tabs_lsp_bytes {
+        eprintln!(
+            "warning: native LSP RSS ({}) was not below node LSP RSS ({})",
+            native_lsp::rss::format_mb(native.after_tabs_lsp_bytes),
+            native_lsp::rss::format_mb(node.after_tabs_lsp_bytes)
+        );
+    }
+    const BUDGET: u64 = 80 * 1024 * 1024;
+    if native.after_tabs_total() > BUDGET {
+        return Err(format!(
+            "native-ide + native-lsp total RSS {} exceeds 80 MB success bar",
+            native_lsp::rss::format_mb(native.after_tabs_total())
+        )
+        .into());
+    }
+    Ok(())
 }
 
-struct OpenFile {
-    path: PathBuf,
-    language_id: String,
+fn spawn_ide_once(ide_bin: &Path, lsp: &str) -> Result<IdeReport, Box<dyn std::error::Error>> {
+    let output = Command::new(ide_bin)
+        .args(["--lsp", lsp, "--once", "--json"])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "native-ide --lsp {lsp} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let report: IdeReport = serde_json::from_slice(&output.stdout)?;
+    Ok(report)
+}
+
+fn print_ide_table(native: &IdeReport, node: &IdeReport) {
+    println!();
+    println!("## Same IDE, swap the LSP (10 mixed-language tabs)");
+    println!();
+    println!("The editor is `native-ide` in both rows. Only the language-server child changes.");
+    println!("Tab switches send `$/nativeLsp/documentVisibility` (not `didClose`).");
+    println!();
+    println!("| stack | IDE | LSP | total |");
+    println!("| --- | ---: | ---: | ---: |");
+    println!(
+        "| native-ide + native-lsp | {} | {} | {} |",
+        native_lsp::rss::format_mb(native.after_tabs_ide_bytes),
+        native_lsp::rss::format_mb(native.after_tabs_lsp_bytes),
+        native_lsp::rss::format_mb(native.after_tabs_total())
+    );
+    println!(
+        "| native-ide + node-lsp | {} | {} | {} |",
+        native_lsp::rss::format_mb(node.after_tabs_ide_bytes),
+        native_lsp::rss::format_mb(node.after_tabs_lsp_bytes),
+        native_lsp::rss::format_mb(node.after_tabs_total())
+    );
+    println!();
+    println!("| stage | native total | node total | delta |");
+    println!("| --- | ---: | ---: | ---: |");
+    row(
+        "idle (IDE buffers + LSP initialize)",
+        native.idle_total(),
+        node.idle_total(),
+    );
+    row(
+        "after didOpen all tabs",
+        native.after_open_total(),
+        node.after_open_total(),
+    );
+    row(
+        "after cycling tabs + hover",
+        native.after_tabs_total(),
+        node.after_tabs_total(),
+    );
+    println!();
+    println!(
+        "IDE RSS held roughly constant: native-host {} vs node-host {}",
+        native_lsp::rss::format_mb(native.after_tabs_ide_bytes),
+        native_lsp::rss::format_mb(node.after_tabs_ide_bytes)
+    );
+    println!(
+        "hover latency: native {} ms, node {} ms",
+        native.hover_ms, node.hover_ms
+    );
+    println!();
 }
 
 struct FileProbe {
@@ -166,11 +256,7 @@ fn measure(
     let pid = child.id();
     let stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
-    let mut client = LspClient {
-        stdin,
-        reader: BufReader::new(stdout),
-        next_id: 1,
-    };
+    let mut client = LspClient::new(stdin, stdout);
 
     client.request(
         "initialize",
@@ -188,7 +274,7 @@ fn measure(
 
     for file in files {
         let text = std::fs::read_to_string(&file.path)?;
-        let uri = path_uri(&file.path);
+        let uri = client::path_uri(&file.path);
         client.notify(
             "textDocument/didOpen",
             json!({
@@ -211,7 +297,7 @@ fn measure(
     };
 
     for file in probe_files {
-        let uri = path_uri(&file.path);
+        let uri = client::path_uri(&file.path);
         let symbols = client.request(
             "textDocument/documentSymbol",
             json!({ "textDocument": { "uri": uri } }),
@@ -391,160 +477,4 @@ fn row(stage: &str, native: u64, node: u64) {
         native_lsp::rss::format_mb(native),
         native_lsp::rss::format_mb(node),
     );
-}
-
-fn path_uri(path: &Path) -> String {
-    format!(
-        "file://{}",
-        path.canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf())
-            .display()
-    )
-}
-
-fn php_files(dir: &Path) -> std::io::Result<Vec<OpenFile>> {
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("php") {
-            files.push(OpenFile {
-                path,
-                language_id: "php".into(),
-            });
-        }
-    }
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(files)
-}
-
-fn mixed_files() -> Result<Vec<OpenFile>, Box<dyn std::error::Error>> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/mixed");
-    if !dir.is_dir() {
-        return Err(format!("missing mixed fixtures at {}", dir.display()).into());
-    }
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        if !path.is_file() {
-            continue;
-        }
-        let language_id = native_lsp::lang::infer_from_uri(&format!(
-            "file:///{}",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        ));
-        files.push(OpenFile { path, language_id });
-    }
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    if files.len() != 10 {
-        return Err(format!(
-            "expected 10 mixed files, found {} in {}",
-            files.len(),
-            dir.display()
-        )
-        .into());
-    }
-    Ok(files)
-}
-
-fn write_fixture(dir: &Path, count: usize) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    for i in 0..count {
-        let body = format!(
-            r#"<?php
-/**
- * Generated fixture file {i} for RSS comparison.
- */
-class Fixture_Plugin_{i} {{
-    public function boot() {{
-        add_action('init', [$this, 'boot']);
-        add_filter('the_content', [$this, 'filter_content']);
-    }}
-
-    public function filter_content($content) {{
-        return $content . ' {i}';
-    }}
-}}
-
-function fixture_{i}_helper() {{
-    $q = new WP_Query(['post_type' => 'post']);
-    return get_option('fixture_{i}');
-}}
-"#
-        );
-        std::fs::write(dir.join(format!("fixture-{i:03}.php")), body)?;
-    }
-    Ok(())
-}
-
-struct LspClient {
-    stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
-    next_id: i64,
-}
-
-impl LspClient {
-    fn request(
-        &mut self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, Box<dyn std::error::Error>> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let payload = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        self.write(&payload)?;
-        loop {
-            let msg = self.read()?;
-            if msg.get("id") == Some(&json!(id)) {
-                if let Some(err) = msg.get("error") {
-                    return Err(format!("{method} error: {err}").into());
-                }
-                return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
-            }
-        }
-    }
-
-    fn notify(&mut self, method: &str, params: Value) -> Result<(), Box<dyn std::error::Error>> {
-        self.write(&json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        }))
-    }
-
-    fn write(&mut self, payload: &Value) -> Result<(), Box<dyn std::error::Error>> {
-        let body = serde_json::to_vec(payload)?;
-        write!(self.stdin, "Content-Length: {}\r\n\r\n", body.len())?;
-        self.stdin.write_all(&body)?;
-        self.stdin.flush()?;
-        Ok(())
-    }
-
-    fn read(&mut self) -> Result<Value, Box<dyn std::error::Error>> {
-        let mut content_length = None;
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = self.reader.read_line(&mut line)?;
-            if n == 0 {
-                return Err("lsp stdout closed".into());
-            }
-            let trimmed = line.trim_end();
-            if trimmed.is_empty() {
-                break;
-            }
-            let lower = trimmed.to_ascii_lowercase();
-            if let Some(rest) = lower.strip_prefix("content-length:") {
-                content_length = Some(rest.trim().parse::<usize>()?);
-            }
-        }
-        let len = content_length.ok_or("missing Content-Length")?;
-        let mut buf = vec![0u8; len];
-        self.reader.read_exact(&mut buf)?;
-        Ok(serde_json::from_slice(&buf)?)
-    }
 }

@@ -12,6 +12,7 @@ A **native Language Server Protocol (LSP)** server: one static binary, stdio JSO
 - [x] PHP / WordPress-shaped symbols (`class`, `function`, `add_action` / `add_filter`)
 - [x] Ten-language scanners in one process (PHP, JS, TS, HTML, CSS, JSON, YAML, SQL, Python, Rust)
 - [x] RSS comparison vs a Node.js LSP with the same protocol
+- [x] Tiny native workbench (`native-ide`) so the editor stays constant
 - [ ] tree-sitter PHP CST
 
 ## Run the server
@@ -49,6 +50,27 @@ Success bar from research: native idle/open RSS **under 80 MB**.
 Latest run (Linux, release): native **~2.3 MB** vs Node **~47–54 MB** on PHP
 fixtures; **~2.3 MB vs ~46 MB** with ten languages in one process. Full table:
 [`docs/COMPARISON.md`](docs/COMPARISON.md).
+
+## Fair comparison: same IDE, swap the LSP
+
+Headless `compare-rss` is already a fair **LSP** A/B (same messages, measure
+only the server). What users feel is **editor + server**. That is only fair if
+the editor is the same process and we report three numbers: IDE RSS, LSP RSS,
+total.
+
+`native-ide` is that editor: mixed-language tabs, hover, document symbols, and
+`$/nativeLsp/documentVisibility` on tab switch (not `didClose`). It is not
+VS Code, and this is not Intelephense.
+
+```bash
+cargo build --release --bin native-lsp --bin native-ide --bin compare-rss
+./target/release/native-ide --lsp native --once
+./target/release/native-ide --lsp node --once
+COMPARE_MODE=ide ./target/release/compare-rss
+```
+
+A homemade IDE vs Cursor + Intelephense would mix editor RAM, extensions, and
+analysis depth. That is a product comparison, not an LSP comparison.
 
 ## License
 

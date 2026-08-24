@@ -1,4 +1,7 @@
+pub mod client;
+pub mod fixture;
 pub mod host;
+pub mod ide;
 pub mod intern;
 pub mod lang;
 pub mod php;
