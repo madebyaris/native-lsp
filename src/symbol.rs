@@ -58,7 +58,7 @@ pub struct Symbol {
 }
 
 pub fn symbol_at_line(symbols: &[Symbol], line: u32) -> Option<&Symbol> {
-    symbols.iter().rev().find(|s| s.line == line)
+    symbols.iter().find(|s| s.line == line)
 }
 
 pub fn ident_at(s: &str) -> Option<&str> {

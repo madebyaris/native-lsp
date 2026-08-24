@@ -252,6 +252,9 @@ fn extract_css(text: &str, intern: &mut Interner) -> Vec<Symbol> {
         if trimmed.starts_with('@') {
             continue;
         }
+        if !trimmed.contains('{') {
+            continue;
+        }
         if let Some(before) = trimmed.split('{').next() {
             for sel in before.split(',') {
                 let sel = sel.trim();
@@ -279,8 +282,13 @@ fn css_ident(s: &str) -> Option<&str> {
 
 fn css_selector_name(sel: &str) -> Option<&str> {
     let sel = sel.trim();
+    if sel.is_empty() || sel == "from" || sel == "to" || sel.ends_with('%') {
+        return None;
+    }
     if sel.starts_with('.') || sel.starts_with('#') {
         css_ident(&sel[1..])
+    } else if sel.starts_with(':') {
+        None
     } else {
         css_ident(sel)
     }

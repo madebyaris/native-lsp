@@ -123,9 +123,11 @@ function extractCss(text) {
       continue;
     }
     if (trimmed.startsWith("@")) continue;
+    if (!trimmed.includes("{")) continue;
     const before = trimmed.split("{")[0];
     for (const sel of before.split(",")) {
       const t = sel.trim();
+      if (!t || t === "from" || t === "to" || t.endsWith("%")) continue;
       const name = t.replace(/^[.#]/, "").split(/[\s:>+~[({]/)[0];
       if (name) symbols.push({ name, kind: "rule", line: i });
     }
@@ -344,7 +346,7 @@ function handleRequest(msg) {
       const uri = msg.params.textDocument.uri;
       const line = msg.params.position.line;
       const doc = docs.get(uri);
-      const sym = [...(doc?.symbols || [])].reverse().find((s) => s.line === line);
+      const sym = (doc?.symbols || []).find((s) => s.line === line);
       const label = sym?.kind || "";
       const display = label === "function" ? `${sym.name}()` : sym?.name;
       respond(

@@ -46,7 +46,9 @@ COMPARE_MODE=mixed ./target/release/compare-rss
 
 Success bar from research: native idle/open RSS **under 80 MB**.
 
-Latest run (Linux, release, same fixture): native **~2.3 MB** vs Node **~47–54 MB**. Full table: [`docs/COMPARISON.md`](docs/COMPARISON.md).
+Latest run (Linux, release): native **~2.3 MB** vs Node **~47–54 MB** on PHP
+fixtures; **~2.3 MB vs ~46 MB** with ten languages in one process. Full table:
+[`docs/COMPARISON.md`](docs/COMPARISON.md).
 
 ## License
 
