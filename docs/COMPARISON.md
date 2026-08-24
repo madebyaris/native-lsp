@@ -73,3 +73,35 @@ V8 idle tax. Interned unique names on native: 71 (includes WordPress stubs).
 Node’s “interned” counter is symbol instances (51), not unique strings.
 
 Replay: `COMPARE_MODE=mixed ./target/release/compare-rss`
+
+## Same IDE, swap the LSP
+
+Headless `compare-rss` is a fair **LSP** A/B. Users feel **editor + server**.
+That is only fair if the editor is the same process and we report three
+numbers: IDE RSS, LSP RSS, total.
+
+`native-ide` holds the editor constant. Ten mixed-language tabs, hover,
+`documentSymbol`, and `$/nativeLsp/documentVisibility` on tab switch (not
+`didClose`). It is not VS Code. This is not Intelephense. A homemade IDE vs
+Cursor + Intelephense would mix editor RAM, extensions, and analysis depth.
+
+| stack | IDE | LSP | total |
+| --- | ---: | ---: | ---: |
+| native-ide + native-lsp | 2.45 MB | 2.32 MB | **4.77 MB** |
+| native-ide + node-lsp | 2.56 MB | 47.68 MB | **50.23 MB** |
+
+| stage | native total | node total | delta |
+| --- | ---: | ---: | ---: |
+| idle (IDE buffers + LSP initialize) | 4.61 MB | 48.38 MB | native saves 43.77 MB |
+| after didOpen all tabs | 4.64 MB | 48.62 MB | native saves 43.98 MB |
+| after cycling tabs + hover | 4.77 MB | 50.23 MB | native saves 45.46 MB |
+
+The IDE floor stayed ~2.5 MB on both runs. The ~45 MB gap is the Node LSP
+child, not the editor.
+
+Replay:
+
+```bash
+cargo build --release --bin native-lsp --bin native-ide --bin compare-rss
+COMPARE_MODE=ide ./target/release/compare-rss
+```
