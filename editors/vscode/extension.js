@@ -4,8 +4,18 @@ const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 let client;
 
 function command() {
+  const cfg = vscode.workspace.getConfiguration("nativeLsp");
+  const fromSettings = cfg.get("command");
+  if (Array.isArray(fromSettings) && fromSettings.length > 0) {
+    return {
+      command: fromSettings[0],
+      args: fromSettings.slice(1),
+      transport: TransportKind.stdio,
+    };
+  }
   const kind = process.env.NATIVE_LSP_KIND || "native";
-  const root = process.env.NATIVE_LSP_ROOT || process.cwd();
+  const root =
+    cfg.get("root") || process.env.NATIVE_LSP_ROOT || process.cwd();
   if (kind === "node") {
     return {
       command: process.env.NODE_BIN || "node",

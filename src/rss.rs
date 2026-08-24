@@ -81,19 +81,32 @@ pub fn find_lsp_pid(host_pid: u32) -> Option<u32> {
 }
 
 pub fn find_lsp_pid_global() -> Option<u32> {
-    pids_with_cmdline("native-lsp")
-        .into_iter()
-        .chain(pids_with_cmdline("node-lsp.mjs"))
-        .find(|&pid| looks_like_lsp(pid))
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if looks_like_lsp(pid) {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+pub fn is_lsp_pid(pid: u32) -> bool {
+    if comm(pid) == "native-lsp" {
+        return true;
+    }
+    cmdline(pid)
+        .split_whitespace()
+        .any(|part| part.ends_with("node-lsp.mjs") || part.ends_with("/native-lsp") || part == "native-lsp")
 }
 
 fn looks_like_lsp(pid: u32) -> bool {
-    let c = comm(pid);
-    let cmd = cmdline(pid);
-    c == "native-lsp"
-        || cmd.contains("/native-lsp")
-        || cmd.contains("native-lsp ")
-        || cmd.contains("node-lsp.mjs")
+    is_lsp_pid(pid)
 }
 
 #[cfg(test)]

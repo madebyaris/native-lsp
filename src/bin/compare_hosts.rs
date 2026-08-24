@@ -202,7 +202,7 @@ fn measure_nvim(
         err
     })?;
     thread::sleep(Duration::from_millis(200));
-    let row = sample_tree("neovim", kind, child.id(), &report_path)?;
+    let row = sample_host("neovim", kind, child.id(), &report_path)?;
     let _ = fs::write(&done_path, b"ok");
     wait_child(&mut child, Duration::from_secs(8))?;
     Ok(row)
@@ -235,7 +235,7 @@ fn measure_emacs(
         err
     })?;
     thread::sleep(Duration::from_millis(200));
-    let row = sample_tree("emacs", kind, child.id(), &report_path)?;
+    let row = sample_host("emacs", kind, child.id(), &report_path)?;
     let _ = fs::write(&done_path, b"ok");
     wait_child(&mut child, Duration::from_secs(8))?;
     Ok(row)
@@ -273,9 +273,8 @@ fn measure_helix(
         }
         thread::sleep(Duration::from_millis(200));
     }
-    thread::sleep(Duration::from_millis(800));
-    let ide = sum_tree(child.id());
-    let lsp = lsp_pid.and_then(|p| rss::rss_bytes_of(p.to_string()));
+    let (ide, lsp) = sample_split(child.id());
+    let _ = lsp_pid;
     let _ = child.kill();
     let _ = child.wait();
     Ok(Row {
@@ -296,6 +295,23 @@ fn measure_vscode(
     let user = dir.join("user");
     let ext = dir.join("ext");
     install_vscode_extension(&ext, root)?;
+    let settings_dir = user.join("User");
+    fs::create_dir_all(&settings_dir)?;
+    let settings = if kind == "node" {
+        serde_json::json!({
+            "nativeLsp.command": [fixture::default_node_bin(), root.join("compare/node-lsp.mjs").display().to_string()],
+            "nativeLsp.root": root,
+        })
+    } else {
+        serde_json::json!({
+            "nativeLsp.command": [native_bin.display().to_string()],
+            "nativeLsp.root": root,
+        })
+    };
+    fs::write(
+        settings_dir.join("settings.json"),
+        serde_json::to_vec_pretty(&settings)?,
+    )?;
     let marker = dir.file_name().unwrap().to_string_lossy().into_owned();
     let files = fixture::mixed_files()?;
     let mut args = vec![
@@ -343,9 +359,13 @@ fn measure_vscode(
     }
     let ide = ide_pids
         .iter()
+        .copied()
+        .filter(|p| !rss::is_lsp_pid(*p))
         .filter_map(|p| rss::rss_bytes_of(p.to_string()))
         .sum();
-    let lsp = lsp_pid.and_then(|p| rss::rss_bytes_of(p.to_string()));
+    let lsp = lsp_pid
+        .filter(|p| rss::is_lsp_pid(*p))
+        .and_then(|p| rss::rss_bytes_of(p.to_string()));
     let _ = child.kill();
     let _ = child.wait();
     // Electron often detaches; kill the user-data-dir process tree.
@@ -361,30 +381,38 @@ fn measure_vscode(
     })
 }
 
-fn sample_tree(
+fn sample_host(
     host: &str,
     kind: &str,
     pid: u32,
     report_path: &Path,
 ) -> Result<Row, Box<dyn std::error::Error>> {
-    let ide = sum_tree(pid);
-    let lsp = rss::find_lsp_pid(pid).and_then(|p| rss::rss_bytes_of(p.to_string()));
-    let hover_files = hover_count(report_path);
+    let (ide, lsp) = sample_split(pid);
     Ok(Row {
         host: host.into(),
         server: kind.into(),
         ide_bytes: ide,
         lsp_bytes: lsp,
-        hover_files,
+        hover_files: hover_count(report_path),
     })
 }
 
-fn sum_tree(pid: u32) -> u64 {
+fn sample_split(pid: u32) -> (u64, Option<u64>) {
+    let lsp = rss::find_lsp_pid(pid);
+    let mut exclude = Vec::new();
+    if let Some(lsp_pid) = lsp {
+        exclude.push(lsp_pid);
+        exclude.extend(rss::descendants(lsp_pid));
+    }
     let mut pids = rss::descendants(pid);
     pids.push(pid);
-    pids.into_iter()
+    let ide = pids
+        .into_iter()
+        .filter(|p| !exclude.contains(p))
         .filter_map(|p| rss::rss_bytes_of(p.to_string()))
-        .sum()
+        .sum();
+    let lsp_bytes = lsp.and_then(|p| rss::rss_bytes_of(p.to_string()));
+    (ide, lsp_bytes)
 }
 
 fn hover_count(path: &Path) -> usize {

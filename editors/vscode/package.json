@@ -14,6 +14,21 @@
     "onStartupFinished"
   ],
   "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "properties": {
+        "nativeLsp.command": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "nativeLsp.root": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    }
+  },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
   }

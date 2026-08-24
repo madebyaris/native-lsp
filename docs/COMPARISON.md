@@ -74,6 +74,38 @@ Node’s “interned” counter is symbol instances (51), not unique strings.
 
 Replay: `COMPARE_MODE=mixed ./target/release/compare-rss`
 
+## Same mixed files, real editors
+
+Installed on this VM: Neovim 0.12.5, Helix 25.07.1, VS Code 1.134, Emacs 29.3
+(already present). `compare-hosts` opens `testdata/mixed/` in each editor and
+swaps only the language-server child. IDE RSS is the editor process tree
+**minus** the LSP. That is the fair host A/B.
+
+| host | LSP | IDE | LSP | total |
+| --- | --- | ---: | ---: | ---: |
+| native-ide | native | 2.45 MB | 2.31 MB | **4.76 MB** |
+| native-ide | node | 2.58 MB | 47.67 MB | 50.25 MB |
+| neovim | native | 12.55 MB | 2.32 MB | **14.88 MB** |
+| neovim | node | 12.70 MB | 46.21 MB | 58.90 MB |
+| helix | native | 36.65 MB | 2.21 MB | **38.86 MB** |
+| helix | node | 36.57 MB | 45.99 MB | 82.56 MB |
+| emacs | native | 67.44 MB | 2.31 MB | **69.75 MB** |
+| emacs | node | 67.48 MB | 45.77 MB | 113.25 MB |
+| vscode | native | 1830.16 MB | 2.23 MB | 1832.39 MB |
+| vscode | node | 1715.34 MB | 45.97 MB | 1761.31 MB |
+
+Across every host the language server stays **~2.3 MB native vs ~46 MB Node**.
+The editor floor is what changes. VS Code’s Electron process tree is ~1.7 GB
+here, so the LSP gap is real but small next to the IDE. Neovim is the other
+end: a real LSP client at ~13 MB plus a 2.3 MB native server.
+
+Replay:
+
+```bash
+cargo build --release --bin native-lsp --bin native-ide --bin compare-hosts
+./target/release/compare-hosts
+```
+
 ## Same IDE, swap the LSP
 
 Headless `compare-rss` is a fair **LSP** A/B. Users feel **editor + server**.

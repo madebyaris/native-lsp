@@ -13,6 +13,7 @@ A **native Language Server Protocol (LSP)** server: one static binary, stdio JSO
 - [x] Ten-language scanners in one process (PHP, JS, TS, HTML, CSS, JSON, YAML, SQL, Python, Rust)
 - [x] RSS comparison vs a Node.js LSP with the same protocol
 - [x] Tiny native workbench (`native-ide`) so the editor stays constant
+- [x] Host A/B in Neovim, Emacs, Helix, and VS Code (`compare-hosts`)
 - [ ] tree-sitter PHP CST
 
 ## Run the server
@@ -63,11 +64,15 @@ total.
 VS Code, and this is not Intelephense.
 
 ```bash
-cargo build --release --bin native-lsp --bin native-ide --bin compare-rss
+cargo build --release --bin native-lsp --bin native-ide --bin compare-rss --bin compare-hosts
 ./target/release/native-ide --lsp native --once
-./target/release/native-ide --lsp node --once
 COMPARE_MODE=ide ./target/release/compare-rss
+./target/release/compare-hosts
 ```
+
+`compare-hosts` drives Neovim, Emacs/Eglot, Helix, and VS Code with the same
+mixed files. The language server stays ~2.3 MB native vs ~46 MB Node in every
+host; VS Code’s Electron tree is ~1.7 GB so the editor dominates.
 
 A homemade IDE vs Cursor + Intelephense would mix editor RAM, extensions, and
 analysis depth. That is a product comparison, not an LSP comparison.

@@ -3,6 +3,7 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'project)
 (require 'eglot)
 
 (setq eglot-sync-connect 5)
@@ -30,40 +31,51 @@
   (directory-files (expand-file-name "testdata/mixed" nlsp-root) t
                    directory-files-no-dot-files-regexp))
 
+(defvar nlsp-server nil)
+
 (defun nlsp-open-all ()
-  (let (bufs)
+  (let ((project `(transient . ,nlsp-root))
+        bufs)
     (dolist (path (sort (nlsp-mixed-files) #'string<))
       (let ((buf (find-file-noselect path)))
         (with-current-buffer buf
-          (fundamental-mode)
-          (eglot-ensure)
-          (push buf bufs))))
-    (nreverse bufs)))
+          (fundamental-mode))
+        (push buf bufs)))
+    (setq bufs (nreverse bufs))
+    (with-current-buffer (car bufs)
+      (eglot 'fundamental-mode project 'eglot-lsp-server (nlsp-cmd) "plaintext")
+      (setq nlsp-server (or (eglot-current-server)
+                            (ignore-errors (eglot--current-server-or-lose)))))
+    bufs))
 
 (defun nlsp-probe (buf)
   (with-current-buffer buf
-    (let* ((server (eglot-current-server))
-           (uri (eglot-path-to-uri (buffer-file-name)))
-           (symbols
-            (and server
-                 (ignore-errors
-                   (jsonrpc-request server :textDocument/documentSymbol
-                                    (list :textDocument (list :uri uri))
-                                    :timeout 3))))
-           (count (if (vectorp symbols) (length symbols) 0))
+    (goto-char (point-min))
+    (let* ((uri (concat "file://" (expand-file-name (buffer-file-name))))
+           (symbols (and nlsp-server
+                         (ignore-errors
+                           (jsonrpc-request
+                            nlsp-server :textDocument/documentSymbol
+                            `(:textDocument (:uri ,uri))
+                            :timeout 3))))
+           (objs (cond ((vectorp symbols) (append symbols nil))
+                       ((listp symbols) symbols)
+                       (t nil)))
+           (count (length objs))
            (line 0)
            hover)
-      (when (and (vectorp symbols) (> count 0))
-        (let ((first (aref symbols 0)))
-          (setq line (or (plist-get (plist-get (plist-get first :location) :range) :start) 0))
-          (when (listp line)
-            (setq line (or (plist-get line :line) 0)))))
-      (when server
+      (when objs
+        (let* ((first (car objs))
+               (range (plist-get (plist-get first :location) :range))
+               (start (plist-get range :start)))
+          (setq line (or (plist-get start :line) 0))))
+      (when nlsp-server
         (let ((res (ignore-errors
-                     (jsonrpc-request server :textDocument/hover
-                                      (list :textDocument (list :uri uri)
-                                            :position (list :line line :character 0))
-                                      :timeout 3))))
+                     (jsonrpc-request
+                      nlsp-server :textDocument/hover
+                      `(:textDocument (:uri ,uri)
+                        :position (:line ,line :character 0))
+                      :timeout 3))))
           (setq hover (or (plist-get (plist-get res :contents) :value) ""))))
       (list
        (cons 'name (file-name-nondirectory (buffer-file-name)))
@@ -71,14 +83,8 @@
        (cons 'symbol_count count)
        (cons 'hover (car (split-string (or hover "") "\n")))))))
 
-    (sleep-for 1)
-    (let* ((bufs (nlsp-open-all))
-       (probes (mapcar #'nlsp-probe bufs))
-       (report `((host . "emacs")
-                 (server . ,nlsp-kind)
-                 (host_pid . ,(emacs-pid))
-                 (probes . ,(vconcat (mapcar (lambda (p) (cons 'object p)) probes))))))
-  ;; json.el wants alists; write a small hand-rolled object instead.
+(let* ((bufs (nlsp-open-all))
+       (probes (mapcar #'nlsp-probe bufs)))
   (with-temp-file nlsp-report
     (insert (json-encode
              `(("host" . "emacs")
