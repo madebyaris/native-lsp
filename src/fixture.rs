@@ -56,6 +56,47 @@ pub fn mixed_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/mixed"))
 }
 
+pub fn wp_plugin_dir() -> PathBuf {
+    std::env::var("NATIVE_LSP_WORKSPACE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/wp-plugin"))
+}
+
+pub fn workspace_files(dir: &Path) -> Result<Vec<OpenFile>, Box<dyn std::error::Error>> {
+    let mut files = Vec::new();
+    walk_files(dir, dir, &mut files)?;
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    if files.is_empty() {
+        return Err(format!("no language files in {}", dir.display()).into());
+    }
+    Ok(files)
+}
+
+fn walk_files(root: &Path, dir: &Path, files: &mut Vec<OpenFile>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if path.file_name().and_then(|s| s.to_str()) == Some("node_modules") {
+                continue;
+            }
+            walk_files(root, &path, files)?;
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let language_id = lang::infer_from_uri(&format!(
+            "file:///{}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        if language_id == "plaintext" {
+            continue;
+        }
+        files.push(OpenFile { path, language_id });
+    }
+    Ok(())
+}
+
 pub fn mixed_files() -> Result<Vec<OpenFile>, Box<dyn std::error::Error>> {
     mixed_files_in(&mixed_dir())
 }
@@ -104,6 +145,9 @@ pub fn php_files(dir: &Path) -> std::io::Result<Vec<OpenFile>> {
 }
 
 pub fn write_php_fixtures(dir: &Path, count: usize) -> std::io::Result<()> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
     std::fs::create_dir_all(dir)?;
     for i in 0..count {
         let body = format!(
@@ -145,5 +189,17 @@ mod tests {
         assert!(langs.contains(&"php"));
         assert!(langs.contains(&"rust"));
         assert!(langs.contains(&"typescript"));
+    }
+
+    #[test]
+    fn wp_plugin_is_a_real_workspace() {
+        let files = workspace_files(&wp_plugin_dir()).expect("testdata/wp-plugin");
+        assert!(files.len() >= 10, "got {} files", files.len());
+        let langs: Vec<_> = files.iter().map(|f| f.language_id.as_str()).collect();
+        assert!(langs.contains(&"php"));
+        assert!(langs.contains(&"javascript"));
+        assert!(langs.contains(&"typescript"));
+        assert!(langs.contains(&"html"));
+        assert!(langs.contains(&"css"));
     }
 }

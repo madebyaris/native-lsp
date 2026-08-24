@@ -1,30 +1,62 @@
 {
-  "name": "native-lsp-host",
-  "displayName": "native-lsp host",
-  "description": "Tiny VS Code client used only to host native-lsp or the Node compare server.",
+  "name": "native-lsp",
+  "displayName": "native-lsp",
+  "description": "One native Language Server for PHP, JS/TS, HTML, CSS, JSON, YAML, SQL, Python, and Rust.",
   "version": "0.1.0",
   "publisher": "native-lsp",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Linters"
   ],
   "activationEvents": [
+    "onLanguage:php",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:html",
+    "onLanguage:css",
+    "onLanguage:json",
+    "onLanguage:yaml",
+    "onLanguage:sql",
+    "onLanguage:python",
+    "onLanguage:rust",
+    "workspaceContains:**/*.{php,js,ts,html,css,json,yml,yaml,sql,py,rs}",
     "onStartupFinished"
   ],
   "main": "./extension.js",
   "contributes": {
     "configuration": {
+      "title": "native-lsp",
       "properties": {
+        "nativeLsp.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the native language server in this workspace."
+        },
         "nativeLsp.command": {
           "type": "array",
           "items": { "type": "string" },
-          "default": []
+          "default": [],
+          "description": "Server argv. Empty uses NATIVE_LSP_BIN or target/release/native-lsp."
         },
         "nativeLsp.root": {
           "type": "string",
-          "default": ""
+          "default": "",
+          "description": "Workspace root passed to the server."
+        },
+        "nativeLsp.reportPath": {
+          "type": "string",
+          "default": "",
+          "description": "If set, probe hover/symbols/completion through the VS Code APIs and write JSON here."
+        },
+        "nativeLsp.logPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional extension log file for harness runs."
         }
       }
     }

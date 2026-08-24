@@ -22,6 +22,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if mode.eq_ignore_ascii_case("ide") {
         return run_ide();
     }
+    if mode.eq_ignore_ascii_case("tabs") {
+        return run_tabs();
+    }
     let mixed = mode.eq_ignore_ascii_case("mixed");
     let file_count: usize = std::env::var("COMPARE_FILES")
         .ok()
@@ -110,6 +113,217 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     Ok(())
+}
+
+fn run_tabs() -> Result<(), Box<dyn std::error::Error>> {
+    let native_bin = fixture::default_native_lsp();
+    let node_bin = fixture::default_node_bin();
+    let node_script = fixture::default_node_script();
+    if !native_bin.exists() {
+        return Err(format!(
+            "native-lsp binary not found at {}. Build with `cargo build --release --bin native-lsp`.",
+            native_bin.display()
+        )
+        .into());
+    }
+    let files = fixture::mixed_files()?;
+    let native = measure_tabs("native-lsp", &native_bin, None, &files)?;
+    let node = measure_tabs(
+        "node-lsp",
+        Path::new(&node_bin),
+        Some(&node_script),
+        &files,
+    )?;
+    println!();
+    println!("## Active-tab split (one process, grammars load on demand)");
+    println!();
+    println!("One server. Open PHP, then JS, then the rest of `testdata/mixed/`.");
+    println!("Only the latest `didOpen` stays Active (one CST). Hidden tabs nap.");
+    println!("Then pin PHP active and park.");
+    println!();
+    println!("| stage | native RSS | CST | grammars | node RSS | delta |");
+    println!("| --- | ---: | ---: | --- | ---: | --- |");
+    for (n, o) in native.iter().zip(node.iter()) {
+        let delta = if o.rss >= n.rss {
+            format!("native saves {}", native_lsp::rss::format_mb(o.rss - n.rss))
+        } else {
+            format!(
+                "native uses extra {}",
+                native_lsp::rss::format_mb(n.rss - o.rss)
+            )
+        };
+        println!(
+            "| {} | {} | {} | {} | {} | {delta} |",
+            n.stage,
+            native_lsp::rss::format_mb(n.rss),
+            n.cst_docs,
+            if n.grammars.is_empty() {
+                "—".into()
+            } else {
+                n.grammars.join(", ")
+            },
+            native_lsp::rss::format_mb(o.rss),
+        );
+    }
+    println!();
+    Ok(())
+}
+
+struct TabStage {
+    stage: String,
+    rss: u64,
+    cst_docs: u64,
+    grammars: Vec<String>,
+}
+
+fn measure_tabs(
+    name: &str,
+    program: &Path,
+    script: Option<&Path>,
+    files: &[OpenFile],
+) -> Result<Vec<TabStage>, Box<dyn std::error::Error>> {
+    let _ = name;
+    let mut cmd = Command::new(program);
+    if let Some(script) = script {
+        cmd.arg(script);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let pid = child.id();
+    let stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut client = LspClient::new(stdin, stdout);
+    client.request(
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "capabilities": {},
+            "rootUri": null,
+        }),
+    )?;
+    client.notify("initialized", json!({}))?;
+    std::thread::sleep(Duration::from_millis(50));
+
+    let mut stages = Vec::new();
+    stages.push(sample_tab_stage(&mut client, pid, "idle after initialize")?);
+
+    let php = files
+        .iter()
+        .find(|f| f.language_id == "php")
+        .ok_or("missing php fixture")?;
+    open_file(&mut client, php)?;
+    std::thread::sleep(Duration::from_millis(40));
+    stages.push(sample_tab_stage(&mut client, pid, "open PHP (1 CST)")?);
+
+    let js = files
+        .iter()
+        .find(|f| f.language_id == "javascript")
+        .ok_or("missing javascript fixture")?;
+    open_file(&mut client, js)?;
+    std::thread::sleep(Duration::from_millis(40));
+    stages.push(sample_tab_stage(
+        &mut client,
+        pid,
+        "open JS (PHP napped, JS CST)",
+    )?);
+
+    for file in files {
+        if file.language_id == "php" || file.language_id == "javascript" {
+            continue;
+        }
+        open_file(&mut client, file)?;
+    }
+    std::thread::sleep(Duration::from_millis(60));
+    stages.push(sample_tab_stage(
+        &mut client,
+        pid,
+        "open remaining 8 langs (1 CST, grammars visited)",
+    )?);
+
+    let php_uri = client::path_uri(&php.path);
+    for file in files {
+        let uri = client::path_uri(&file.path);
+        let state = if file.language_id == "php" {
+            "active"
+        } else {
+            "hidden"
+        };
+        client.notify(
+            "$/nativeLsp/documentVisibility",
+            json!({ "uri": uri, "state": state }),
+        )?;
+    }
+    client.notify("$/nativeLsp/wake", json!({}))?;
+    let _ = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": php_uri } }),
+    )?;
+    std::thread::sleep(Duration::from_millis(40));
+    stages.push(sample_tab_stage(
+        &mut client,
+        pid,
+        "pin PHP active, hide others",
+    )?);
+
+    client.notify(
+        "$/nativeLsp/sleep",
+        json!({ "reason": "idle", "depth": "park" }),
+    )?;
+    std::thread::sleep(Duration::from_millis(80));
+    stages.push(sample_tab_stage(&mut client, pid, "park (drop CSTs + parsers)")?);
+
+    let _ = client.request("shutdown", json!(null));
+    client.notify("exit", json!(null))?;
+    drop(client);
+    let _ = child.wait();
+    Ok(stages)
+}
+
+fn open_file(client: &mut LspClient, file: &OpenFile) -> Result<(), Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(&file.path)?;
+    let uri = client::path_uri(&file.path);
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": file.language_id,
+                "version": 1,
+                "text": text
+            }
+        }),
+    )?;
+    Ok(())
+}
+
+fn sample_tab_stage(
+    client: &mut LspClient,
+    pid: u32,
+    stage: &str,
+) -> Result<TabStage, Box<dyn std::error::Error>> {
+    let rss = native_lsp::rss::rss_bytes_of(pid.to_string())
+        .ok_or_else(|| format!("could not read RSS for pid {pid}"))?;
+    let report = client.request("nativeLsp/memoryReport", json!(null))?;
+    let cst_docs = report.get("cst_docs").and_then(Value::as_u64).unwrap_or(0);
+    let grammars = report
+        .get("grammars_loaded")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(TabStage {
+        stage: stage.into(),
+        rss,
+        cst_docs,
+        grammars,
+    })
 }
 
 fn run_ide() -> Result<(), Box<dyn std::error::Error>> {
@@ -233,6 +447,9 @@ struct Sample {
     pid: u32,
     interned: u64,
     languages: Vec<String>,
+    parsers: Vec<String>,
+    grammars: Vec<String>,
+    cst_docs: u64,
     files: Vec<FileProbe>,
 }
 
@@ -355,6 +572,27 @@ fn measure(
                 .collect()
         })
         .unwrap_or_default();
+    let parsers = report
+        .get("parsers")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let cst_docs = report.get("cst_docs").and_then(Value::as_u64).unwrap_or(0);
+    let grammars = report
+        .get("grammars_loaded")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
 
     client.notify(
         "$/nativeLsp/sleep",
@@ -377,6 +615,9 @@ fn measure(
         pid,
         interned,
         languages,
+        parsers,
+        grammars,
+        cst_docs,
         files: probes,
     })
 }
@@ -415,6 +656,20 @@ fn print_mixed(native: &Sample, node: &Sample) {
     );
     println!();
     println!("languages: {}", native.languages.join(", "));
+    println!(
+        "parsers: native {} (cst docs {}, grammars {})",
+        if native.parsers.is_empty() {
+            "n/a".into()
+        } else {
+            native.parsers.join(", ")
+        },
+        native.cst_docs,
+        if native.grammars.is_empty() {
+            "—".into()
+        } else {
+            native.grammars.join(", ")
+        }
+    );
     println!(
         "interned names: native {}, node {}",
         native.interned, node.interned
