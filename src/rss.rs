@@ -109,6 +109,101 @@ fn looks_like_lsp(pid: u32) -> bool {
     is_lsp_pid(pid)
 }
 
+/// One `/proc` row for editor-tree dumps (VS Code Electron especially).
+#[derive(Debug, Clone)]
+pub struct ProcSample {
+    pub pid: u32,
+    pub comm: String,
+    pub role: String,
+    pub rss_bytes: u64,
+}
+
+pub fn sample_procs(pids: &[u32]) -> Vec<ProcSample> {
+    let mut rows: Vec<ProcSample> = pids
+        .iter()
+        .copied()
+        .filter_map(|pid| {
+            Some(ProcSample {
+                pid,
+                comm: comm(pid),
+                role: process_role(pid),
+                rss_bytes: rss_bytes_of(pid.to_string())?,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| b.rss_bytes.cmp(&a.rss_bytes).then(a.pid.cmp(&b.pid)));
+    rows
+}
+
+pub fn process_role(pid: u32) -> String {
+    if is_lsp_pid(pid) {
+        if comm(pid) == "native-lsp" {
+            return "language-server (native-lsp)".into();
+        }
+        return "language-server (node-lsp)".into();
+    }
+    let cmd = cmdline(pid);
+    if cmd.contains("crashpad") {
+        return "crashpad".into();
+    }
+    if let Some(kind) = electron_type(&cmd) {
+        return match kind {
+            "gpu-process" => "gpu-process (Chromium)".into(),
+            "renderer" => "renderer (Monaco / workbench)".into(),
+            "utility" => {
+                if cmd.contains("extensionHost")
+                    || cmd.contains("NodeService")
+                    || cmd.contains("node.mojom")
+                {
+                    "extensionHost (Node)".into()
+                } else {
+                    "utility".into()
+                }
+            }
+            "zygote" => "zygote".into(),
+            "broker" => "broker".into(),
+            other => other.to_string(),
+        };
+    }
+    "main (Electron)".into()
+}
+
+fn electron_type(cmd: &str) -> Option<&str> {
+    let rest = cmd.split("--type=").nth(1)?;
+    rest.split_whitespace().next()
+}
+
+pub fn format_proc_table(rows: &[ProcSample]) -> String {
+    let mut out = String::from("| pid | role | RSS | comm |\n| ---: | --- | ---: | --- |\n");
+    for row in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} | `{}` |\n",
+            row.pid,
+            row.role,
+            format_mb(row.rss_bytes),
+            row.comm.replace('|', " ")
+        ));
+    }
+    out
+}
+
+pub fn format_role_totals(rows: &[ProcSample]) -> String {
+    use std::collections::BTreeMap;
+    let mut totals: BTreeMap<&str, (u64, usize)> = BTreeMap::new();
+    for row in rows {
+        let entry = totals.entry(row.role.as_str()).or_insert((0, 0));
+        entry.0 += row.rss_bytes;
+        entry.1 += 1;
+    }
+    let mut out = String::from("| role | processes | RSS |\n| --- | ---: | ---: |\n");
+    let mut ranked: Vec<_> = totals.into_iter().collect();
+    ranked.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    for (role, (bytes, n)) in ranked {
+        out.push_str(&format!("| {role} | {n} | {} |\n", format_mb(bytes)));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -92,7 +92,8 @@ fn handle_request(
             "nativeLsp": {
                 "host": host,
                 "rssBytes": rss::rss_bytes(),
-                "lifecycle": true
+                "lifecycle": true,
+                "languages": crate::lang::LANGUAGE_SUPPORT
             }
         })),
         "textDocument/hover" => Ok(hover(ws, &params).unwrap_or(Value::Null)),
@@ -174,6 +175,8 @@ fn memory_report(ws: &Workspace, host: &HostInfo) -> Value {
         "interned": ws.intern.len(),
         "open_docs": ws.open_count(),
         "parsed_docs": ws.parsed_count(),
+        "cst_docs": ws.cst_count(),
+        "parsers": ws.parser_kinds(),
         "languages": ws.language_ids(),
         "host": host,
     })

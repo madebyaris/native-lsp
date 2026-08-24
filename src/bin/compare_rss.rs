@@ -233,6 +233,8 @@ struct Sample {
     pid: u32,
     interned: u64,
     languages: Vec<String>,
+    parsers: Vec<String>,
+    cst_docs: u64,
     files: Vec<FileProbe>,
 }
 
@@ -355,6 +357,17 @@ fn measure(
                 .collect()
         })
         .unwrap_or_default();
+    let parsers = report
+        .get("parsers")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let cst_docs = report.get("cst_docs").and_then(Value::as_u64).unwrap_or(0);
 
     client.notify(
         "$/nativeLsp/sleep",
@@ -377,6 +390,8 @@ fn measure(
         pid,
         interned,
         languages,
+        parsers,
+        cst_docs,
         files: probes,
     })
 }
@@ -415,6 +430,20 @@ fn print_mixed(native: &Sample, node: &Sample) {
     );
     println!();
     println!("languages: {}", native.languages.join(", "));
+    println!(
+        "parsers: native {} (cst docs {}), node {}",
+        if native.parsers.is_empty() {
+            "n/a".into()
+        } else {
+            native.parsers.join(", ")
+        },
+        native.cst_docs,
+        if node.parsers.is_empty() {
+            "n/a".into()
+        } else {
+            node.parsers.join(", ")
+        }
+    );
     println!(
         "interned names: native {}, node {}",
         native.interned, node.interned

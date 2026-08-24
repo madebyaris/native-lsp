@@ -1,8 +1,75 @@
-//! Language-id dispatch. Each scanner is a line-oriented extract, not a CST.
+//! Language-id dispatch. Non-PHP languages are line-oriented extracts, not CSTs.
 
 use crate::intern::Interner;
 use crate::php;
 use crate::symbol::{self, push_ident, Symbol, SymbolKind};
+
+/// What the server actually does today. This is not Intelephense + tsserver.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct LanguageSupport {
+    pub id: &'static str,
+    pub parser: &'static str,
+    pub symbols: &'static str,
+}
+
+pub const LANGUAGE_SUPPORT: &[LanguageSupport] = &[
+    LanguageSupport {
+        id: "php",
+        parser: "tree-sitter",
+        symbols: "class, method, function, WordPress add_action/add_filter (line-scan fallback)",
+    },
+    LanguageSupport {
+        id: "javascript",
+        parser: "line-scan",
+        symbols: "class, function, const/let/var arrow or function",
+    },
+    LanguageSupport {
+        id: "typescript",
+        parser: "line-scan",
+        symbols: "JS plus interface, type, enum — not a typechecker",
+    },
+    LanguageSupport {
+        id: "html",
+        parser: "line-scan",
+        symbols: "id, class, custom elements",
+    },
+    LanguageSupport {
+        id: "css",
+        parser: "line-scan",
+        symbols: "selectors, @keyframes",
+    },
+    LanguageSupport {
+        id: "json",
+        parser: "line-scan",
+        symbols: "object keys",
+    },
+    LanguageSupport {
+        id: "yaml",
+        parser: "line-scan",
+        symbols: "keys at indent 0–2",
+    },
+    LanguageSupport {
+        id: "sql",
+        parser: "line-scan",
+        symbols: "CREATE TABLE/VIEW/INDEX/FUNCTION/PROCEDURE",
+    },
+    LanguageSupport {
+        id: "python",
+        parser: "line-scan",
+        symbols: "class, def, async def",
+    },
+    LanguageSupport {
+        id: "rust",
+        parser: "line-scan",
+        symbols: "fn, struct, enum, impl, trait, mod, const",
+    },
+];
+
+/// Common editor languages with no scanner yet. didOpen keeps text; symbols stay empty.
+pub const UNSUPPORTED_COMMON: &[&str] = &[
+    "go", "java", "c", "cpp", "csharp", "ruby", "vue", "svelte", "markdown", "shell", "xml",
+    "toml", "lua", "kotlin", "swift", "dart",
+];
 
 pub fn normalize_language_id(language_id: &str, uri: &str) -> String {
     let raw = language_id.trim();
@@ -602,6 +669,26 @@ mod tests {
         assert!(rs.contains(&"Index".into()));
         assert!(rs.contains(&"intern".into()));
         assert!(rs.contains(&"Kind".into()));
+    }
+
+    #[test]
+    fn support_matrix_covers_scanners() {
+        let ids: Vec<_> = LANGUAGE_SUPPORT.iter().map(|l| l.id).collect();
+        assert_eq!(ids, vec![
+            "php",
+            "javascript",
+            "typescript",
+            "html",
+            "css",
+            "json",
+            "yaml",
+            "sql",
+            "python",
+            "rust",
+        ]);
+        assert_eq!(LANGUAGE_SUPPORT[0].parser, "tree-sitter");
+        assert!(LANGUAGE_SUPPORT[1..].iter().all(|l| l.parser == "line-scan"));
+        assert!(UNSUPPORTED_COMMON.contains(&"go"));
     }
 
     #[test]

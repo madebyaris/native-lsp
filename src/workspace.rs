@@ -1,7 +1,8 @@
-//! Open documents. Nap drops parsed symbols; text stays until didClose.
+//! Open documents. Nap drops parsed symbols and the CST; text stays until didClose.
 
 use std::collections::HashMap;
 
+use crate::cst::{self, ParserKind};
 use crate::intern::Interner;
 use crate::lang;
 use crate::php;
@@ -20,16 +21,23 @@ pub struct Document {
     pub language_id: String,
     pub text: String,
     pub symbols: Option<Vec<Symbol>>,
+    pub tree: Option<tree_sitter::Tree>,
+    pub parser: ParserKind,
     pub visibility: Visibility,
 }
 
 impl Document {
     pub fn parse(&mut self, intern: &mut Interner) {
-        self.symbols = Some(lang::extract(&self.language_id, &self.text, intern));
+        let old = self.tree.take();
+        let out = cst::parse(&self.language_id, &self.text, old.as_ref(), intern);
+        self.symbols = Some(out.symbols);
+        self.tree = out.tree;
+        self.parser = out.kind;
     }
 
     pub fn nap(&mut self) {
         self.symbols = None;
+        self.tree = None;
     }
 }
 
@@ -47,6 +55,8 @@ impl Workspace {
             language_id,
             text,
             symbols: None,
+            tree: None,
+            parser: ParserKind::LineScan,
             visibility: Visibility::Active,
         };
         doc.parse(&mut self.intern);
@@ -109,6 +119,22 @@ impl Workspace {
         self.docs.values().filter(|d| d.symbols.is_some()).count()
     }
 
+    pub fn cst_count(&self) -> usize {
+        self.docs.values().filter(|d| d.tree.is_some()).count()
+    }
+
+    pub fn parser_kinds(&self) -> Vec<String> {
+        let mut kinds: Vec<String> = self
+            .docs
+            .values()
+            .filter(|d| d.symbols.is_some())
+            .map(|d| d.parser.label().to_string())
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        kinds
+    }
+
     pub fn language_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.docs.values().map(|d| d.language_id.clone()).collect();
         ids.sort();
@@ -144,5 +170,34 @@ impl Workspace {
         names.sort();
         names.dedup();
         names
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn php_open_keeps_cst_until_nap() {
+        let mut ws = Workspace::default();
+        let src = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("testdata/mixed/01-plugin.php"),
+        )
+        .unwrap();
+        ws.open(
+            "file:///plugin.php".into(),
+            "php".into(),
+            src,
+        );
+        assert_eq!(ws.parsed_count(), 1);
+        assert_eq!(ws.cst_count(), 1);
+        assert_eq!(ws.parser_kinds(), vec!["tree-sitter".to_string()]);
+        ws.set_visibility("file:///plugin.php", Visibility::Hidden);
+        assert_eq!(ws.parsed_count(), 0);
+        assert_eq!(ws.cst_count(), 0);
+        ws.set_visibility("file:///plugin.php", Visibility::Active);
+        assert_eq!(ws.parsed_count(), 1);
+        assert_eq!(ws.cst_count(), 1);
     }
 }

@@ -1,4 +1,5 @@
 pub mod client;
+pub mod cst;
 pub mod fixture;
 pub mod host;
 pub mod ide;

@@ -1,4 +1,4 @@
-//! Lightweight PHP / WordPress symbol scan. Tree-sitter can replace this later.
+//! Line-scan fallback for PHP / WordPress. Open files prefer `cst` (tree-sitter).
 
 use crate::intern::Interner;
 use crate::symbol::{first_quoted, ident_at, Symbol, SymbolKind};

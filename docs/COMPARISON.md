@@ -99,6 +99,28 @@ The editor floor is what changes. VS Code’s Electron process tree is ~1.7 GB
 here, so the LSP gap is real but small next to the IDE. Neovim is the other
 end: a real LSP client at ~13 MB plus a 2.3 MB native server.
 
+## Why VS Code is ~1.7 GB (not native-lsp)
+
+The native server in that run was **2.23 MB**. The rest is the editor:
+
+1. **Electron = Chromium.** Main process + renderer (Monaco) + GPU + crashpad.
+   `compare-hosts` attributes every process whose cmdline contains the unique
+   `--user-data-dir` temp dir to “vscode”.
+2. **The extension host is still Node.** `editors/vscode/extension.js` uses
+   `vscode-languageclient`. Native-lsp only replaces the language-server
+   **child**. You still pay for a Node extension host.
+3. **Workbench cost is fixed.** Opening ten mixed files still starts the full
+   VS Code UI. Swap the LSP and the IDE RSS barely moves; swap Neovim for
+   VS Code and it jumps by ~1.8 GB.
+
+Replay the per-process dump:
+
+```bash
+COMPARE_HOSTS=vscode ./target/release/compare-hosts
+```
+
+(Per-pid table is filled from the next `compare-hosts` run on this branch.)
+
 Replay:
 
 ```bash

@@ -36,6 +36,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("code:    {}", which("code").display());
 
     let mut rows = Vec::new();
+    let mut vscode_dumps = Vec::new();
     for host in [
         Host::NativeIde,
         Host::Neovim,
@@ -43,6 +44,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Host::Helix,
         Host::VsCode,
     ] {
+        if !host_wanted(host) {
+            continue;
+        }
         if !host.available() {
             eprintln!("skip {}: binary not on PATH", host.name());
             continue;
@@ -50,16 +54,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         for kind in ["native", "node"] {
             eprintln!("--- {} + {}-lsp ---", host.name(), kind);
             match measure(host, kind, &root, &native_bin) {
-                Ok(row) => {
+                Ok(measured) => {
                     eprintln!(
                         "  IDE {}  LSP {}  total {}",
-                        rss::format_mb(row.ide_bytes),
-                        row.lsp_bytes
+                        rss::format_mb(measured.row.ide_bytes),
+                        measured
+                            .row
+                            .lsp_bytes
                             .map(rss::format_mb)
                             .unwrap_or_else(|| "n/a".into()),
-                        rss::format_mb(row.total()),
+                        rss::format_mb(measured.row.total()),
                     );
-                    rows.push(row);
+                    if let Some(dump) = measured.vscode {
+                        vscode_dumps.push(dump);
+                    }
+                    rows.push(measured.row);
                 }
                 Err(err) => eprintln!("  failed: {err}"),
             }
@@ -88,7 +97,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!();
+    if !vscode_dumps.is_empty() {
+        println!("## Why VS Code looks huge (it is not native-lsp)");
+        println!();
+        println!("`compare-hosts` sums every process whose cmdline contains the unique");
+        println!("`--user-data-dir` marker. That tree is Chromium main + renderer + GPU");
+        println!("+ crashpad + the **Node extension host**. native-lsp only replaces the");
+        println!("language-server child. Opening ten files still loads the full workbench.");
+        println!();
+        for dump in &vscode_dumps {
+            println!("### vscode + {}-lsp", dump.server);
+            println!();
+            print!("{}", rss::format_role_totals(&dump.procs));
+            println!();
+            print!("{}", rss::format_proc_table(&dump.procs));
+            println!();
+        }
+    }
     Ok(())
+}
+
+fn host_wanted(host: Host) -> bool {
+    let Ok(raw) = std::env::var("COMPARE_HOSTS") else {
+        return true;
+    };
+    if raw.trim().is_empty() {
+        return true;
+    }
+    raw.split(',')
+        .any(|s| s.trim().eq_ignore_ascii_case(host.name()))
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +167,16 @@ struct Row {
     hover_files: usize,
 }
 
+struct VsCodeDump {
+    server: String,
+    procs: Vec<rss::ProcSample>,
+}
+
+struct Measured {
+    row: Row,
+    vscode: Option<VsCodeDump>,
+}
+
 impl Row {
     fn total(&self) -> u64 {
         self.ide_bytes.saturating_add(self.lsp_bytes.unwrap_or(0))
@@ -141,14 +188,18 @@ fn measure(
     kind: &str,
     root: &Path,
     native_bin: &Path,
-) -> Result<Row, Box<dyn std::error::Error>> {
+) -> Result<Measured, Box<dyn std::error::Error>> {
     match host {
-        Host::NativeIde => measure_native_ide(kind, root),
-        Host::Neovim => measure_nvim(kind, root, native_bin),
-        Host::Emacs => measure_emacs(kind, root, native_bin),
-        Host::Helix => measure_helix(kind, root, native_bin),
+        Host::NativeIde => wrap_row(measure_native_ide(kind, root)?),
+        Host::Neovim => wrap_row(measure_nvim(kind, root, native_bin)?),
+        Host::Emacs => wrap_row(measure_emacs(kind, root, native_bin)?),
+        Host::Helix => wrap_row(measure_helix(kind, root, native_bin)?),
         Host::VsCode => measure_vscode(kind, root, native_bin),
     }
+}
+
+fn wrap_row(row: Row) -> Result<Measured, Box<dyn std::error::Error>> {
+    Ok(Measured { row, vscode: None })
 }
 
 fn measure_native_ide(kind: &str, root: &Path) -> Result<Row, Box<dyn std::error::Error>> {
@@ -290,7 +341,7 @@ fn measure_vscode(
     kind: &str,
     root: &Path,
     native_bin: &Path,
-) -> Result<Row, Box<dyn std::error::Error>> {
+) -> Result<Measured, Box<dyn std::error::Error>> {
     let dir = unique_dir("vscode");
     let user = dir.join("user");
     let ext = dir.join("ext");
@@ -338,7 +389,7 @@ fn measure_vscode(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let mut ide_pids = Vec::new();
+    let mut ide_pids;
     let mut lsp_pid = None;
     let deadline = Instant::now() + Duration::from_secs(25);
     while Instant::now() < deadline {
@@ -366,18 +417,25 @@ fn measure_vscode(
     let lsp = lsp_pid
         .filter(|p| rss::is_lsp_pid(*p))
         .and_then(|p| rss::rss_bytes_of(p.to_string()));
+    let procs = rss::sample_procs(&ide_pids);
     let _ = child.kill();
     let _ = child.wait();
     // Electron often detaches; kill the user-data-dir process tree.
     for pid in rss::pids_with_cmdline(&marker) {
         let _ = Command::new("kill").arg(pid.to_string()).status();
     }
-    Ok(Row {
-        host: "vscode".into(),
-        server: kind.into(),
-        ide_bytes: ide,
-        lsp_bytes: lsp,
-        hover_files: 0,
+    Ok(Measured {
+        row: Row {
+            host: "vscode".into(),
+            server: kind.into(),
+            ide_bytes: ide,
+            lsp_bytes: lsp,
+            hover_files: 0,
+        },
+        vscode: Some(VsCodeDump {
+            server: kind.into(),
+            procs,
+        }),
     })
 }
 

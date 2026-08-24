@@ -14,7 +14,7 @@ A **native Language Server Protocol (LSP)** server: one static binary, stdio JSO
 - [x] RSS comparison vs a Node.js LSP with the same protocol
 - [x] Tiny native workbench (`native-ide`) so the editor stays constant
 - [x] Host A/B in Neovim, Emacs, Helix, and VS Code (`compare-hosts`)
-- [ ] tree-sitter PHP CST
+- [x] tree-sitter PHP CST on **open files only** (nap drops the tree)
 
 ## Run the server
 
@@ -76,6 +76,44 @@ host; VS Code’s Electron tree is ~1.7 GB so the editor dominates.
 
 A homemade IDE vs Cursor + Intelephense would mix editor RAM, extensions, and
 analysis depth. That is a product comparison, not an LSP comparison.
+
+## Why VS Code looks huge with this LSP
+
+It is not native-lsp. The last host A/B had **native-lsp at ~2.2 MB** inside a
+**~1.7 GB** VS Code process tree. `compare-hosts` sums every process whose
+cmdline contains the unique `--user-data-dir` marker:
+
+- Chromium **main** + **renderer** (Monaco workbench) + **GPU** + crashpad
+- The **extension host is still Node** (`vscode-languageclient` in
+  `editors/vscode/`). Native LSP only replaces the **server** child.
+- Opening ten files still loads the full workbench.
+
+Replay just that dump: `COMPARE_HOSTS=vscode ./target/release/compare-hosts`
+
+## Language support
+
+This is **not** Intelephense + tsserver + vscode-html/css/json. One process,
+symbols + hover + completion from interned names. No typechecker, no
+workspace goto-def index, no diagnostics.
+
+| Language | Parser | What works |
+| --- | --- | --- |
+| PHP | tree-sitter CST (line-scan fallback) | class, method, function, `add_action` / `add_filter` |
+| JavaScript | line-scan | class, function, const/let/var fn |
+| TypeScript | line-scan | JS plus interface, type, enum |
+| HTML | line-scan | id, class, custom elements |
+| CSS | line-scan | selectors, `@keyframes` |
+| JSON | line-scan | object keys |
+| YAML | line-scan | keys at indent 0–2 |
+| SQL | line-scan | `CREATE TABLE/VIEW/INDEX/FUNCTION` |
+| Python | line-scan | class, def |
+| Rust | line-scan | fn, struct, enum, impl, trait, mod, const |
+| Go, Java, C/C++, Ruby, Vue, Markdown, Shell, … | none | plaintext; empty symbols |
+
+Tree-sitter is **open-file only**. `$/nativeLsp/sleep` / hidden-tab nap drops
+the CST and the symbol vec; buffer text stays until `didClose`. Extra grammars
+(JS/HTML/CSS/JSON) would raise compile time and binary size; they are not
+loaded yet.
 
 ## License
 
