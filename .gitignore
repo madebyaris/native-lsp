@@ -1,0 +1,7 @@
+/target
+/testdata/generated
+compare/node_modules
+.native-lsp/
+*.rs.bk
+.idea/
+.vscode/

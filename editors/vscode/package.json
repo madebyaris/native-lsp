@@ -1,0 +1,35 @@
+{
+  "name": "native-lsp-host",
+  "displayName": "native-lsp host",
+  "description": "Tiny VS Code client used only to host native-lsp or the Node compare server.",
+  "version": "0.1.0",
+  "publisher": "native-lsp",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "properties": {
+        "nativeLsp.command": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "nativeLsp.root": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
