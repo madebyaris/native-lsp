@@ -125,7 +125,10 @@ function hoverText(hovers) {
       } else if (item && typeof item.value === "string") {
         text = item.value;
       }
-      const line = text.split("\n").find((part) => part.trim());
+      const line = text.split("\n").find((part) => {
+        const trimmed = part.trim();
+        return trimmed && !trimmed.startsWith("```");
+      });
       if (line) {
         return line.trim();
       }
@@ -189,12 +192,13 @@ async function waitForSymbols(uri, languageId) {
 }
 
 async function waitForHover(uri, pos, languageId) {
-  const budget = symbolWaitMs(languageId) > 2500 ? 8000 : 1500;
+  const budget = symbolWaitMs(languageId);
   const start = Date.now();
   let hovers = [];
   while (Date.now() - start < budget) {
     hovers = (await execute("vscode.executeHoverProvider", uri, pos)) || [];
-    if (hoverText(hovers)) {
+    const text = hoverText(hovers);
+    if (text && !text.includes("(loading...)")) {
       return hovers;
     }
     await sleep(400);
