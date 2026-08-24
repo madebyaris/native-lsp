@@ -20,6 +20,7 @@ Native code can drop that runtime tax. It does not automatically drop RAM: `rust
 | VRAM | Not for the symbol table (Apple Silicon is the same DRAM; CUDA lookups are too slow per keystroke). Optional later embedding sidecar |
 | Host profiles | One binary; skip GPU steps on machines that do not have them |
 | Lifecycle | IDE tells us tab-active / idle / sleep; we do not infer it from `didOpen` |
+| Index math | Intern IDs, FST completions, Bloom/Roaring/Elias–Fano postings, viewport token ranges |
 | First language | PHP, WordPress-shaped (`wp-includes` stubs, hooks) |
 | Success bar | Idle RSS **&lt; 80 MB** on a typical WP plugin fixture |
 | Not in scope | TypeScript type checking (`tsgo` already exists), cloning Intelephense |
@@ -28,6 +29,7 @@ Native code can drop that runtime tax. It does not automatically drop RAM: `rust
 
 - [x] Language and architecture research
 - [x] Host profiles + IDE-driven sleep/wake (see `docs/RESEARCH.md` §8)
+- [x] Mathematical index + viewport memory methods (`docs/RESEARCH.md` §9)
 - [ ] Hello-world server (`initialize` / `shutdown` + RSS report)
 - [ ] Compact index + tree-sitter PHP
 - [ ] WordPress stubs and hook intelligence

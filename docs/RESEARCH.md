@@ -6,6 +6,8 @@
 
 **VRAM follow-up:** parking the index in GPU memory does **not** move the hurdle off system RAM on Apple Silicon (unified memory is one DRAM pool). On a discrete NVIDIA card it can hide RSS from the CPU, but it is the wrong place for go-to-definition / completion (single-key latency). VRAM is a later optional sidecar for **dense embedding search**, not for the symbol table.
 
+**Index math:** intern `u32` IDs, mmap FST for names, Bloom skip + Elias–Fano/Roaring postings, CSR graphs, and **viewport** token ranges — not sketches on goto-def.
+
 ---
 
 ## 1. Why Node.js LSPs feel heavy
@@ -395,7 +397,87 @@ Editor wiring (not in the server):
 
 ---
 
-## 9. Risks
+## 9. Mathematical methods that actually cut RAM
+
+The remaining RAM is not “the protocol.” It is **redundant strings, pointer-rich graphs, posting lists, and work for text that is not on screen.** Information retrieval and succinct-data-structure results apply directly. None of this needs VRAM.
+
+### The view (viewport) — do not materialize what the user cannot see
+
+LSP already has range APIs. Use them; do not precompute a full-document overlay.
+
+| Feature | Standard hook | Memory rule |
+| --- | --- | --- |
+| Semantic highlighting | `textDocument/semanticTokens/range` (and delta for `full`) | Tokens for the **visible window** first. Spec: range exists so the UI can paint before a full pass; full is for minimap / flicker-free scroll. |
+| Inlay hints / code lens | range-capable requests | Same: only the viewport. |
+| Diagnostics | pull `textDocument/diagnostic` | Client pulls the **active** (and maybe visible) docs. We do not push a workspace-wide diagnostic vector. |
+| Completions | triggered at a position | Walk the open-file CST + FST prefix, not every symbol in RAM. |
+
+Tree-sitter can parse a whole PHP file cheaply (typical plugin file is tens of KB). The expensive part is **keeping classified tokens, type snapshots, and inlay caches for thousands of lines off-screen**. Drop those on nap (see §8). Binary-search a sorted token list for the visible byte range (`O(log N + visible)`), do not scan the file.
+
+Document buffer: one rope / piece table, **incremental `didChange`**. Never clone the whole string per keystroke.
+
+### Interning and hash-consing (the biggest structural win)
+
+A WordPress tree repeats `WP_Post`, `add_action`, paths, and PHPDoc fragments tens of thousands of times.
+
+- **String intern table:** one copy per unique byte string, 32-bit ID everywhere else. clangd sorts the table then zlib-compresses it on disk (sorted strings compress well).
+- **Hash-cons types:** `array<int, WP_Post>` is one interned type node; every occurrence stores the ID. Compilers do this (`TyId`). Cyclic type graphs become integer IDs in an arena, not `Rc` pointer soup.
+- **32-bit IDs, not 64-bit pointers:** halves every graph edge. The mmap file uses file-relative `u32` offsets so the OS can page it.
+
+This is the same idea as V8 compressed oops / JVM compressed references, applied on purpose.
+
+### Probabilistic skip (Bloom) and compressed sets (Roaring)
+
+**Bloom filters** (Metals, 2019): one small filter per file of “symbol IDs referenced here.” Find-references probes the filter first and **skips files that cannot contain the symbol**. False positives only cost time, never correctness. Metals: three indexes, **~8 MB for ~600k LOC**, sub-second refs.
+
+**Roaring bitmaps:** compressed `set<file_id>` / `set<symbol_id>` (array vs bitmap vs run containers per 2¹⁶ chunk). clice stores “which files mention this symbol” this way. Union/intersection stay fast; much smaller than `HashSet<u32>`.
+
+Use Bloom to *avoid work*. Use Roaring to *store the posting list* when we do keep it.
+
+### Finite-state transducers for completion (the name dictionary)
+
+Prefix completion is an ordered set of strings. A **minimal automaton / FST** shares prefixes *and* suffixes. Lucene’s `FSTCompletion` is this; BurntSushi’s Rust [`fst`](https://docs.rs/fst) mmaps the automaton and answers prefix / range / fuzzy (Levenshtein automaton) **without loading the key set**. SuRF/FST is ~10 bits/node, near the information-theoretic floor for tries.
+
+lexindex-style: FST + optional **minimal perfect hash** → on the order of ~6 bytes/key, mmap, `string → id` in one probe.
+
+This replaces `HashMap<String, Symbol>` for `workspace/symbol` and `completion`. Fuzzy `wp_get_*` is an automaton walk, not a RAM scan.
+
+### Quasi-succinct posting lists (Elias–Fano)
+
+Find-references is an inverted index: symbol → sorted list of `(file_id, offset)`. Those lists are monotone integers. **Elias–Fano** encodes them near the information-theoretic bound and still supports `next ≥ x` in essentially constant time (Vigna’s quasi-succinct indices). Partitioned EF is the search-engine default.
+
+On disk + mmap: posting lists should be EF (or roaring if dense), **not** `Vec<Location>`.
+
+Frozen symbol table: **minimal perfect hash** (one probe, no vacancies) once the index is immutable. Rebuild on save batch, not per keystroke.
+
+### Sparse graphs, not objects
+
+`extends` / `implements` / `add_action` → callback is a directed graph. Store **CSR** (compressed sparse row): `offsets: [u32]`, `edges: [u32]`. One array, no per-node heap allocations. WordPress hook maps (`action name → [callbacks]`) are exactly this.
+
+### What not to spend time on (low ROI for a WP-sized tree)
+
+| Idea | Why skip for v1 |
+| --- | --- |
+| Succinct trees (LOUDS/DFUDS) for the live CST | Great for frozen trees; painful to mutate while typing. Keep a normal arena CST for the **active** file only. |
+| Wavelet trees | Overkill until millions of tokens. |
+| HyperLogLog / Count-Min | Cardinality sketches; we need exact goto-def. |
+| Salsa over the whole workspace | Incrementality, not RAM; rust-analyzer shows it can *increase* RSS. |
+| Product-quantized embeddings | Only if we add the optional semantic sidecar. Prefer **SimHash / MinHash** (64–128 bit) over 384-d float vectors if we want “similar code” later. |
+
+### What we adopt, in order
+
+1. `u32` intern IDs + sorted string table (zstd on disk).
+2. Viewport range requests; no full-document token cache until asked.
+3. Bloom per file for find-refs; Roaring or Elias–Fano postings in the mmap index.
+4. mmap’d FST for names / completion.
+5. CSR for hooks and inheritance.
+6. Perfect hash on the frozen symbol table after each index flush.
+
+These are orthogonal to host profiles and sleep. They shrink the **mmap payload** so even a fully awake server stays under the 80 MB bar.
+
+---
+
+## 10. Risks
 
 - **Rebuilding Intelephense.** Feature-complete PHP analysis is years. Scope to navigation + completion + diagnostics on a budget, then deepen WP-specific intelligence.
 - **rowan/salsa by default.** They optimize for incrementality and IDE fidelity, not RSS. Use them only for the *open file*.
@@ -405,10 +487,11 @@ Editor wiring (not in the server):
 - **VRAM as a fake RAM win.** On Apple Silicon it is the same DRAM. On NVIDIA it adds launch latency and fights local models. GPU only as an opt-in dense sidecar.
 - **Guessing idle from silence.** File watchers and pull diagnostics keep the wire busy; “user is reading” sends nothing. Sleep is a client notification.
 - **Tab switch ≠ `didClose`.** Dropping all open documents on hide would desync dirty buffers. Nap per URI, not a fake close.
+- **Approximate structures on the critical path.** Bloom/SuRF may false-positive; never false-negative goto-def. Exact ID lookup stays on intern + perfect hash.
 
 ---
 
-## 10. Sources
+## 11. Sources
 
 - LSP overview and spec 3.18: https://microsoft.github.io/language-server-protocol/
 - Official SDKs: https://microsoft.github.io/language-server-protocol/implementors/sdks/
@@ -431,10 +514,18 @@ Editor wiring (not in the server):
 - LSP 3.17 pull diagnostics (client decides visible docs; do not infer UI from didOpen): https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_pullDiagnostics
 - vscode-languageserver-node “only sync visible documents”: https://github.com/microsoft/vscode-languageserver-node/issues/848
 - Idle timeout is a client concern (Claude Code request): https://github.com/anthropics/claude-code/issues/35276
+- Metals bloom-filter indexes (~8 MB / 600k LOC): https://scalameta.org/metals/blog/2019/01/22/bloom-filters/
+- Roaring bitmaps: https://roaringbitmap.org/
+- Elias–Fano quasi-succinct indices (Vigna): https://vigna.di.unimi.it/ftp/papers/QuasiSuccinctIndices.pdf
+- Rust `fst` (mmap prefix/fuzzy dictionaries): https://docs.rs/fst
+- Lucene FSTCompletion
+- SuRF / succinct tries (~10 bits/node): https://cacm.acm.org/research/succinct-range-filters/
+- clangd interned zlib string table: `clang-tools-extra/clangd/index/Serialization.cpp`
+- LSP semantic tokens range (viewport): https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_semanticTokens
 
 ---
 
-## 11. Decision
+## 12. Decision
 
 | Decision | Choice |
 | --- | --- |
@@ -445,6 +536,7 @@ Editor wiring (not in the server):
 | VRAM | **Not for the symbol index.** Optional later embedding sidecar, NVIDIA opt-in; Apple Silicon counts as RAM |
 | Host profiles | One binary: `cpu` / `apple-unified` / `nvidia-discrete` / `unknown`; skip missing steps |
 | Lifecycle | IDE sends visibility + sleep/wake; server does not guess; depths nap → park → hibernate → exit |
+| Index math | Intern `u32` IDs; FST names; Bloom skip + Elias–Fano/Roaring postings; CSR graphs; viewport range tokens |
 | First language | PHP with WordPress stubs/hooks |
 | Success bar | &lt; 80 MB idle RSS on a WP plugin fixture, &lt; 2 s to first completion; nap wake &lt; 20 ms |
 | Non-goal | TypeScript type checker, Intelephense-complete PHP in v1, GPU required for core LSP |
