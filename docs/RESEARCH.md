@@ -305,9 +305,97 @@ Those features fight Cursor and local LLMs for the **same** VRAM. A 428 MB embed
 
 Do not put the hurdle in VRAM for v1. Keep the compact mmap index. If we later want AI-shaped `workspace/symbol` or an MCP “search this repo”, add a **feature-flagged embedding index** that can live in VRAM on NVIDIA and in unified memory on Apple — measured separately from the 80 MB idle bar.
 
+Each machine gets its own **host profile** at `initialize` (see §8). The same binary; different steps. No GPU path is required for the core server to work.
+
 ---
 
-## 8. Risks
+## 8. Sleep / wake: the IDE tells us, we do not guess
+
+Two follow-ups from the VRAM discussion:
+
+1. **The same binary has to behave on every computer** — Mac unified memory, NVIDIA discrete VRAM, or CPU-only. Detect once, pick a profile, skip steps that machine does not have.
+2. **Hot working set should follow the active tab and idle time.** Switching away or walking away should drop arenas / GPU sidecars. The **editor** must send that signal. The server must not invent UI state from `didOpen`.
+
+### Why the server cannot infer “this tab is inactive”
+
+LSP `textDocument/didOpen` / `didClose` are **ownership** of the buffer, not visibility. The spec is explicit: after `didOpen`, the client owns the in-memory contents until `didClose`. Switching tabs in VS Code / Cursor **does not** send `didClose`. Ten PHP tabs = ten open documents on the server, even if only one is on screen.
+
+Microsoft’s own pull-diagnostics write-up says inferring UI state from `didOpen` / `didChange` produces false positives. That is why LSP 3.17 added `textDocument/diagnostic` **pull**: the client asks only for the document the user types in (and, optionally, other *visible* editors). That is the closest standard hook we have. It is not sleep, and it is not tab-focus.
+
+Clients that already reaped idle servers (Claude Code feature request, Hermes agent, Sublime LSP closing the process a few seconds after the last related file) all do it **in the client**. rust-analyzer has no idle-exit option; the LSP spec puts lifecycle on the client (`shutdown` / `exit`).
+
+### Host profile (fix each step for the computer in front of us)
+
+Advertised at `initialize`. Server detects; client may override.
+
+| Profile | Typical machine | Symbol index | Optional embedding sidecar | Sleep does |
+| --- | --- | --- | --- | --- |
+| `cpu` | no usable GPU | mmap | off | drop arenas, `madvise(DONTNEED)` |
+| `apple-unified` | M-series | mmap | Metal only if user opts in; **counts as RAM** | drop arenas; do not pretend Metal saved RSS |
+| `nvidia-discrete` | PCIe NVIDIA | mmap | VRAM sidecar allowed | **free VRAM first**, then arenas |
+| `unknown` | VM, SSH, no GPU query | mmap | off | same as `cpu` |
+
+Unknown / SSH / headless defaults to `cpu`. A missing CUDA driver is not an error; that step is skipped. Core LSP never requires a GPU.
+
+### Sleep depths (IDE picks depth; server executes)
+
+Do not kill the process on every tab switch. Wake from a full `exit` is a cold start (stubs + mmap). Wake from a nap should be a keystroke.
+
+| Depth | When the IDE should send it | What we drop | Wake target |
+| --- | --- | --- | --- |
+| **nap** | Active tab is no longer this document (still open in a background tab) | CST / type arena for that URI; keep buffer text | &lt; 20 ms |
+| **park** | No PHP (or HTML/…) tab *visible*, or window unfocused | All arenas; unmap / `cudaFree` embedding sidecar; mmap stays | &lt; 100 ms |
+| **hibernate** | Idle timeout (no activity the **IDE** measured), or OS memory pressure | park + stop index threads; optional `madvise` on mmap | &lt; 500 ms |
+| **exit** | Workspace closed, or long idle the user configured (minutes) | `shutdown` / `exit`; process gone | &lt; 2 s cold start (same as first-open bar) |
+
+Idle timeout lives in the **client**. The server does not run a “no requests for N seconds” timer as the source of truth: pull diagnostics, file watchers, and “user is reading” would all lie. The IDE has `onDidChangeActiveTextEditor`, `onDidChangeVisibleTextEditors`, window focus, and last keystroke. Those are the clocks.
+
+Dirty buffers: never `exit` while a document is unsaved and still `didOpen`. Nap is allowed; the text stays. If the client sent `didClose` on a dirty file, that is a client bug.
+
+### Client → server notifications (custom until the spec grows this)
+
+Standard LSP is not enough. We add a small experimental namespace. Clients that do not implement it still work: we fall back to `didOpen`/`didClose` plus an LRU of N hot ASTs (clangd’s “keep 3”).
+
+```
+# client capability
+experimental.nativeLsp.lifecycle: {
+  visibility: true,
+  sleep: true
+}
+
+# client → server
+$/nativeLsp/documentVisibility
+  { uri, state: "active" | "visible" | "hidden" }
+
+$/nativeLsp/windowFocus
+  { focused: boolean }
+
+$/nativeLsp/sleep
+  { reason: "idle" | "unfocused" | "hidden" | "lowMemory",
+    depth: "nap" | "park" | "hibernate" | "exit" }
+
+$/nativeLsp/wake
+  { reason: "tabActive" | "focus" | "request" }
+```
+
+`wake` before the next `textDocument/completion` is ideal; if a request arrives while slept, the server wakes itself, then answers (may miss the &lt;20 ms nap budget once).
+
+Editor wiring (not in the server):
+
+- Cursor / VS Code extension: `window.onDidChangeActiveTextEditor`, `onDidChangeVisibleTextEditors`, `window.state`, `window.onDidChangeWindowState`.
+- Neovim: `BufEnter` / `BufLeave`, `FocusLost` / `FocusGained`, plus a client-side idle timer.
+- Time-activity: client setting, e.g. park after 30 s unfocused, hibernate after 2 min idle, exit after 15 min with no visible matching files.
+
+### What we refuse to do
+
+- Sleep because “no JSON-RPC for a while” (false idle).
+- Treat `didOpen` as “user is looking at this file”.
+- Require the custom notifications (fallback LRU).
+- Different binaries per OS/GPU; one binary, skipped steps.
+
+---
+
+## 9. Risks
 
 - **Rebuilding Intelephense.** Feature-complete PHP analysis is years. Scope to navigation + completion + diagnostics on a budget, then deepen WP-specific intelligence.
 - **rowan/salsa by default.** They optimize for incrementality and IDE fidelity, not RSS. Use them only for the *open file*.
@@ -315,10 +403,12 @@ Do not put the hurdle in VRAM for v1. Keep the compact mmap index. If we later w
 - **UTF-16 / Windows paths / cancellation.** LSP edge cases eat time. Put them in `lsp-core` tests before fancy analysis.
 - **PHPantom already exists.** A generic PHP clone has no reason to live. WordPress-shaped intelligence + multi-language process consolidation is the reason this repo exists.
 - **VRAM as a fake RAM win.** On Apple Silicon it is the same DRAM. On NVIDIA it adds launch latency and fights local models. GPU only as an opt-in dense sidecar.
+- **Guessing idle from silence.** File watchers and pull diagnostics keep the wire busy; “user is reading” sends nothing. Sleep is a client notification.
+- **Tab switch ≠ `didClose`.** Dropping all open documents on hide would desync dirty buffers. Nap per URI, not a fake close.
 
 ---
 
-## 9. Sources
+## 10. Sources
 
 - LSP overview and spec 3.18: https://microsoft.github.io/language-server-protocol/
 - Official SDKs: https://microsoft.github.io/language-server-protocol/implementors/sdks/
@@ -338,10 +428,13 @@ Do not put the hurdle in VRAM for v1. Keep the compact mmap index. If we later w
 - mmap CPU lookup ~350 ns p50: maph / similar compact indexes
 - GPU code-search sidecars: https://github.com/Artemarius/Engram, https://github.com/slyccc/srclight
 - FAISS + NVIDIA cuVS (build on GPU, search on CPU is supported): https://engineering.fb.com/2025/05/08/data-infrastructure/accelerating-gpu-indexes-in-faiss-with-nvidia-cuvs/
+- LSP 3.17 pull diagnostics (client decides visible docs; do not infer UI from didOpen): https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_pullDiagnostics
+- vscode-languageserver-node “only sync visible documents”: https://github.com/microsoft/vscode-languageserver-node/issues/848
+- Idle timeout is a client concern (Claude Code request): https://github.com/anthropics/claude-code/issues/35276
 
 ---
 
-## 10. Decision
+## 11. Decision
 
 | Decision | Choice |
 | --- | --- |
@@ -350,8 +443,10 @@ Do not put the hurdle in VRAM for v1. Keep the compact mmap index. If we later w
 | Protocol stack | `lsp-server` + `lsp-types`, sync main loop |
 | RAM strategy | open-file CST + mmap compact index + per-request arenas |
 | VRAM | **Not for the symbol index.** Optional later embedding sidecar, NVIDIA opt-in; Apple Silicon counts as RAM |
+| Host profiles | One binary: `cpu` / `apple-unified` / `nvidia-discrete` / `unknown`; skip missing steps |
+| Lifecycle | IDE sends visibility + sleep/wake; server does not guess; depths nap → park → hibernate → exit |
 | First language | PHP with WordPress stubs/hooks |
-| Success bar | &lt; 80 MB idle RSS on a WP plugin fixture, &lt; 2 s to first completion |
+| Success bar | &lt; 80 MB idle RSS on a WP plugin fixture, &lt; 2 s to first completion; nap wake &lt; 20 ms |
 | Non-goal | TypeScript type checker, Intelephense-complete PHP in v1, GPU required for core LSP |
 
 Implementation should not start until this direction is accepted. The next commit after that is a hello-world `initialize` / `shutdown` server that prints RSS, not a parser.
