@@ -50,9 +50,10 @@ COMPARE_MODE=tabs ./target/release/compare-rss
 
 Success bar from research: native idle/open RSS **under 80 MB**.
 
-Latest run (Linux, release, with tree-sitter PHP): native **~4.8 MB** (80 PHP
-files) / **~7 MB** (200 PHP files) vs Node **~47–54 MB**; mixed languages
-**~3.1 MB vs ~46 MB**. Full table: [`docs/COMPARISON.md`](docs/COMPARISON.md).
+Latest run (Linux, release, active-tab CST): native **~3.5 MB** (80 PHP
+files) / **~3.6 MB** (200 PHP files) vs Node **~47–54 MB**; visiting all
+nine tree-sitter grammars in one process is **~6.4 MB vs ~46 MB**. Full
+table: [`docs/COMPARISON.md`](docs/COMPARISON.md).
 
 ## Fair comparison: same IDE, swap the LSP
 

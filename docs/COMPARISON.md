@@ -5,8 +5,9 @@ Measured on this cloud agent VM (Linux, `/proc/<pid>/status` `VmRSS`) after
 (initialize, `didOpen`, hover, park sleep). The Node server is
 `compare/node-lsp.mjs` (no npm deps). Default fixtures are generated PHP classes
 with `add_action` / `add_filter` hooks. `COMPARE_MODE=mixed` opens ten files of
-different languages from `testdata/mixed/` in one process. PHP open files now
-use a **tree-sitter CST**; other languages stay line-scan.
+different languages from `testdata/mixed/` in one process. Common languages
+use a **tree-sitter CST on the active tab only**; hidden tabs nap. SQL is
+line-scan (no tree-sitter 0.22 crate). Release binary is **5.0 MB**.
 
 This is **not** Intelephense. It is the V8 runtime tax plus a heap document
 store vs a static Rust binary with interned `u32` names. That is the first
@@ -16,65 +17,88 @@ claim from the research: drop Node before arguing about indexes.
 
 | stage | native-lsp | node-lsp | delta |
 | --- | ---: | ---: | ---: |
-| idle after initialize | 2.32 MB | 45.90 MB | native saves 43.59 MB |
-| after didOpen all files + hover | 4.75 MB | 47.09 MB | native saves 42.34 MB |
-| after park sleep | 4.75 MB | 47.12 MB | native saves 42.38 MB |
+| idle after initialize | 2.32 MB | 45.97 MB | native saves 43.64 MB |
+| after didOpen all files + hover | 3.48 MB | 47.15 MB | native saves 43.67 MB |
+| after park sleep | 3.48 MB | 47.18 MB | native saves 43.71 MB |
 
 Hover: native 0 ms, node 0 ms.
 
-Tree-sitter is why open RSS moved from ~2.3 MB (line-scan only) to **4.75 MB**:
-one PHP grammar plus 80 in-memory CSTs. Still far under the 80 MB bar.
+Each `didOpen` naps the previous file, so 80 PHP buffers cost **one CST**
+(~3.5 MB), not 80 trees. Before the tab split, 80 CSTs were 4.75 MB.
 
 ## 200 PHP files
 
 | stage | native-lsp | node-lsp | delta |
 | --- | ---: | ---: | ---: |
-| idle after initialize | 2.25 MB | 45.88 MB | native saves 43.63 MB |
-| after didOpen all files + hover | 7.00 MB | 54.34 MB | native saves 47.34 MB |
-| after park sleep | 7.00 MB | 54.39 MB | native saves 47.39 MB |
+| idle after initialize | 2.30 MB | 45.96 MB | native saves 43.66 MB |
+| after didOpen all files + hover | 3.64 MB | 54.44 MB | native saves 50.80 MB |
+| after park sleep | 3.64 MB | 54.49 MB | native saves 50.86 MB |
 
-Hover: native 0 ms, node 0 ms.
+Hover: native 0 ms, node 0 ms. Node grows ~8 MB on 200 files; native barely
+moves because only the last tab keeps a tree.
 
 ## Notes
 
-- Native stays **~5–7 MB** with PHP CSTs, under the 80 MB research bar.
-- Node idle is already **~46 MB** (V8 floor). Opening 200 PHP files adds ~8 MB more.
-- Park sleep did not shrink RSS here: dropping CST/symbol vecs does not
-  return pages to the OS at this size. The grammar stays mapped. The win is
-  still not allocating them on a 45 MB runtime in the first place.
+- Native stays **~3.5–6.5 MB** with lazy grammars + one CST, under the 80 MB bar.
+- Node idle is already **~46 MB** (V8 floor).
+- Park sleep did not shrink RSS: dropping parser objects does not unmap
+  grammar pages. The win is still not paying a 45 MB runtime.
 - Re-run: `cargo build --release --bin native-lsp --bin compare-rss && ./target/release/compare-rss`
 
 Replay: `COMPARE_FILES=200 ./target/release/compare-rss`
+
+## Active-tab split (grammars on demand)
+
+`COMPARE_MODE=tabs` is one process. Open PHP, then JS, then the rest of
+`testdata/mixed/`. Only the latest tab keeps a CST. Grammars load when first
+needed and stay mapped.
+
+| stage | native RSS | CST | grammars | node RSS | delta |
+| --- | ---: | ---: | --- | ---: | --- |
+| idle after initialize | 2.34 MB | 0 | — | 45.80 MB | native saves 43.46 MB |
+| open PHP (1 CST) | 3.37 MB | 1 | php | 45.85 MB | native saves 42.48 MB |
+| open JS (PHP napped, JS CST) | 3.76 MB | 1 | javascript, php | 45.90 MB | native saves 42.14 MB |
+| open remaining 8 langs (1 CST) | 6.38 MB | 1 | 9 grammars | 46.11 MB | native saves 39.73 MB |
+| pin PHP active, hide others | 6.44 MB | 1 | 9 grammars | 46.60 MB | native saves 40.16 MB |
+| park (drop CSTs + parsers) | 6.44 MB | 0 | — | 46.61 MB | native saves 40.18 MB |
+
+PHP grammar ~1 MB. Each extra grammar is a few hundred KB of faulted pages.
+Visiting all nine still sits at **6.4 MB vs Node 46 MB**. Keeping every CST
+would have been the rust-analyzer mistake; the binary can hold the grammars
+because the trees do not.
+
+Replay: `COMPARE_MODE=tabs ./target/release/compare-rss`
 
 ## Mixed languages (10 files, one process)
 
 `COMPARE_MODE=mixed` opens `testdata/mixed/` — PHP, JavaScript, TypeScript, HTML,
 CSS, JSON, YAML, SQL, Python, Rust — in a **single** native-lsp (and Node)
-process. Hover and `documentSymbol` are probed per file. `memoryReport` said
-parsers `tree-sitter, line-scan` with **1 CST** (the PHP file).
+process. Hover and `documentSymbol` are probed per file (hidden tabs re-parse
+symbols, no second CST). `memoryReport`: **1 CST**, grammars
+`css, html, javascript, json, php, python, rust, typescript, yaml`. SQL is
+line-scan.
 
 | file | language | native symbols | native hover | node symbols | node hover |
-| --- | --- | ---: | ---: | ---: | --- |
+| --- | --- | ---: | --- | ---: | --- |
 | `01-plugin.php` | php | 6 | php class Mixed_Plugin | 6 | php class Mixed_Plugin |
-| `02-widget.js` | javascript | 3 | javascript class CartWidget | 3 | javascript class CartWidget |
-| `03-api.ts` | typescript | 5 | typescript type UserId | 5 | typescript type UserId |
-| `04-page.html` | html | 6 | html tag hero | 6 | html tag hero |
+| `02-widget.js` | javascript | 5 | javascript class CartWidget | 3 | javascript class CartWidget |
+| `03-api.ts` | typescript | 7 | typescript type UserId | 5 | typescript type UserId |
+| `04-page.html` | html | 7 | html tag hero | 6 | html tag hero |
 | `05-theme.css` | css | 4 | css rule hero | 4 | css rule hero |
 | `06-package.json` | json | 8 | json key name | 8 | json key name |
-| `07-compose.yaml` | yaml | 5 | yaml key services | 5 | yaml key services |
+| `07-compose.yaml` | yaml | 10 | yaml key services | 5 | yaml key services |
 | `08-schema.sql` | sql | 3 | sql table posts | 3 | sql table posts |
 | `09-app.py` | python | 5 | python class Store | 5 | python class Store |
 | `10-lib.rs` | rust | 6 | rust type Kind | 6 | rust type Kind |
 
 | stage | native-lsp | node-lsp | delta |
 | --- | ---: | ---: | ---: |
-| idle after initialize | 2.30 MB | 45.89 MB | native saves 43.59 MB |
-| after didOpen 10 languages + hover | 3.09 MB | 46.35 MB | native saves 43.25 MB |
-| after park sleep | 3.09 MB | 46.36 MB | native saves 43.27 MB |
+| idle after initialize | 2.30 MB | 45.88 MB | native saves 43.58 MB |
+| after didOpen 10 languages + hover | 6.56 MB | 46.34 MB | native saves 39.78 MB |
+| after park sleep | 6.56 MB | 46.36 MB | native saves 39.79 MB |
 
-One PHP grammar plus nine line-scanners sits at **~3.1 MB**. Node is still the
-V8 idle tax. Interned unique names on native: 71 (includes WordPress stubs).
-Node’s “interned” counter is symbol instances (51), not unique strings.
+Tree-sitter finds methods/nested keys the line scanner missed (JS 5 vs 3,
+YAML 10 vs 5). Interned unique names on native: 78 (includes WordPress stubs).
 
 Replay: `COMPARE_MODE=mixed ./target/release/compare-rss`
 
