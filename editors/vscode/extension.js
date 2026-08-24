@@ -105,15 +105,31 @@ function symbolPosition(symbols) {
 }
 
 function hoverText(hovers) {
-  if (!hovers || !hovers[0] || !hovers[0].contents) {
+  if (!hovers) {
     return "";
   }
-  const first = hovers[0].contents[0];
-  if (typeof first === "string") {
-    return first.split("\n")[0];
-  }
-  if (first && first.value) {
-    return String(first.value).split("\n")[0];
+  const list = Array.isArray(hovers) ? hovers : [hovers];
+  for (const hover of list) {
+    if (!hover) {
+      continue;
+    }
+    const contents = Array.isArray(hover.contents)
+      ? hover.contents
+      : hover.contents
+        ? [hover.contents]
+        : [];
+    for (const item of contents) {
+      let text = "";
+      if (typeof item === "string") {
+        text = item;
+      } else if (item && typeof item.value === "string") {
+        text = item.value;
+      }
+      const line = text.split("\n").find((part) => part.trim());
+      if (line) {
+        return line.trim();
+      }
+    }
   }
   return "";
 }
@@ -143,10 +159,26 @@ async function waitForWorkspaceFiles() {
   return vscode.workspace.findFiles(include, "**/node_modules/**");
 }
 
-async function waitForSymbols(uri) {
+function symbolWaitMs(languageId) {
+  if (
+    languageId === "javascript" ||
+    languageId === "javascriptreact" ||
+    languageId === "typescript" ||
+    languageId === "typescriptreact" ||
+    languageId === "html" ||
+    languageId === "css" ||
+    languageId === "json"
+  ) {
+    return 20000;
+  }
+  return 2500;
+}
+
+async function waitForSymbols(uri, languageId) {
+  const budget = symbolWaitMs(languageId);
   const start = Date.now();
   let symbols = [];
-  while (Date.now() - start < 20000) {
+  while (Date.now() - start < budget) {
     symbols = (await execute("vscode.executeDocumentSymbolProvider", uri)) || [];
     if (Array.isArray(symbols) && symbols.length > 0) {
       return symbols;
@@ -154,6 +186,20 @@ async function waitForSymbols(uri) {
     await sleep(400);
   }
   return Array.isArray(symbols) ? symbols : [];
+}
+
+async function waitForHover(uri, pos, languageId) {
+  const budget = symbolWaitMs(languageId) > 2500 ? 8000 : 1500;
+  const start = Date.now();
+  let hovers = [];
+  while (Date.now() - start < budget) {
+    hovers = (await execute("vscode.executeHoverProvider", uri, pos)) || [];
+    if (hoverText(hovers)) {
+      return hovers;
+    }
+    await sleep(400);
+  }
+  return hovers;
 }
 
 async function probeWorkspace() {
@@ -170,17 +216,10 @@ async function probeWorkspace() {
     const doc = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false });
     sendVisibility();
-    if (i === 0) {
-      await waitForSymbols(uri);
-    }
-    const symbols = (await execute("vscode.executeDocumentSymbolProvider", uri)) || [];
+    const symbols = await waitForSymbols(uri, doc.languageId);
     const symbolCount = Array.isArray(symbols) ? symbols.length : 0;
     const pos = symbolPosition(symbols);
-    let hovers = (await execute("vscode.executeHoverProvider", uri, pos)) || [];
-    if (!hoverText(hovers)) {
-      await sleep(500);
-      hovers = (await execute("vscode.executeHoverProvider", uri, pos)) || [];
-    }
+    const hovers = await waitForHover(uri, pos, doc.languageId);
     const completions = await execute("vscode.executeCompletionItemProvider", uri, pos);
     const completionCount = completions && completions.items ? completions.items.length : 0;
     probes.push({

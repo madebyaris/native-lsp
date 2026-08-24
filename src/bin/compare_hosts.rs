@@ -597,6 +597,10 @@ fn measure_vscode_workspace(
         "workbench.startupEditor": "none",
         "editor.quickSuggestions": false,
         "extensions.ignoreRecommendations": true,
+        "files.associations": {
+            "docker-compose.yaml": "yaml",
+            "docker-compose.yml": "yaml"
+        },
     });
     if kind == "native" {
         settings["nativeLsp.command"] = serde_json::json!([native_bin.display().to_string()]);
@@ -651,7 +655,7 @@ fn measure_vscode_workspace(
         .stderr(File::create(&stderr_path)?)
         .spawn()?;
     if probe {
-        if let Err(err) = wait_for_report(&report_path, Duration::from_secs(90)) {
+        if let Err(err) = wait_for_report(&report_path, Duration::from_secs(180)) {
             let _ = child.kill();
             reap_marker(&marker);
             let extra = fs::read_to_string(&log_path).unwrap_or_default();
