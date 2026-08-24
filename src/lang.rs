@@ -6,10 +6,15 @@ use crate::symbol::{self, push_ident, Symbol, SymbolKind};
 
 pub fn normalize_language_id(language_id: &str, uri: &str) -> String {
     let raw = language_id.trim();
-    if !raw.is_empty() && raw != "plaintext" && raw != "plain" {
-        return map_alias(raw).to_string();
+    if raw.is_empty() {
+        return infer_from_uri(uri);
     }
-    infer_from_uri(uri)
+    let mapped = map_alias(raw);
+    if is_known(mapped) {
+        mapped.to_string()
+    } else {
+        infer_from_uri(uri)
+    }
 }
 
 pub fn infer_from_uri(uri: &str) -> String {
@@ -43,8 +48,25 @@ fn map_alias(id: &str) -> &str {
         "javascriptreact" | "jsx" => "javascript",
         "typescriptreact" | "tsx" => "typescript",
         "yml" => "yaml",
+        "fundamental" | "text" | "plain" | "plaintext" | "plaintex" => "plaintext",
         other => other,
     }
+}
+
+fn is_known(id: &str) -> bool {
+    matches!(
+        id,
+        "php"
+            | "javascript"
+            | "typescript"
+            | "html"
+            | "css"
+            | "json"
+            | "yaml"
+            | "sql"
+            | "python"
+            | "rust"
+    )
 }
 
 pub fn extract(language_id: &str, text: &str, intern: &mut Interner) -> Vec<Symbol> {
@@ -589,6 +611,10 @@ mod tests {
         assert_eq!(
             normalize_language_id("javascriptreact", "file:///x.jsx"),
             "javascript"
+        );
+        assert_eq!(
+            normalize_language_id("fundamental", "file:///tmp/a.php"),
+            "php"
         );
     }
 

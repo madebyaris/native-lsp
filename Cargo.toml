@@ -21,6 +21,10 @@ path = "src/bin/compare_rss.rs"
 name = "native-ide"
 path = "src/bin/native_ide.rs"
 
+[[bin]]
+name = "compare-hosts"
+path = "src/bin/compare_hosts.rs"
+
 [profile.release]
 lto = true
 codegen-units = 1
