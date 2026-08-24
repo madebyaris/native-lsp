@@ -4,6 +4,8 @@
 **Question:** can we replace Node.js language servers with a native binary (C++, Zig, or Rust) and actually use less RAM?
 **Short answer:** yes — but only if we pick the right *architecture*. The language is maybe 20–40% of the RAM win. Indexing strategy is the rest.
 
+**VRAM follow-up:** parking the index in GPU memory does **not** move the hurdle off system RAM on Apple Silicon (unified memory is one DRAM pool). On a discrete NVIDIA card it can hide RSS from the CPU, but it is the wrong place for go-to-definition / completion (single-key latency). VRAM is a later optional sidecar for **dense embedding search**, not for the symbol table.
+
 ---
 
 ## 1. Why Node.js LSPs feel heavy
@@ -252,17 +254,71 @@ Parser v1: **tree-sitter-php** (incremental, error-tolerant, good enough for sym
 
 ---
 
-## 7. Risks
+## 7. Putting the hurdle in VRAM
+
+The hurdle is the **workspace index** (symbols, references, later types). The question: can we keep that blob in GPU memory so system RAM stays free for the editor, `php`, and local models?
+
+### Two different machines, two different answers
+
+**Apple Silicon (the likely daily driver here).** There is no second pool. CPU, GPU, and Neural Engine share one DRAM. A Metal/`MTLBuffer` allocation is still process footprint; Activity Monitor counts it; memory pressure includes it. “Upload to VRAM” is a no-op — you already paid in RAM. The only GPU win on Mac is *bandwidth for dense scans*, not *hiding bytes*.
+
+**Discrete NVIDIA (PCIe).** VRAM *is* extra. A 400 MB index on the card does not show up as CPU RSS. That part of the idea is real. The rest of the idea fights the access pattern.
+
+### Why a GPU hash table is the wrong tool for LSP
+
+Completion, hover, and go-to-definition are **one key (or a handful) per keystroke**. The CPU already does that in **~200–400 ns** from an mmap’d compact table (L3 / DRAM, no syscall on the hit path).
+
+A GPU wants the opposite: millions of keys in one kernel so launch cost amortizes.
+
+| Path | Typical cost | Fit for `textDocument/definition` |
+| --- | --- | --- |
+| CPU mmap lookup | 0.2–0.4 µs | Yes |
+| CUDA kernel launch floor | **~5 µs** even for a null kernel (PCIe + driver, stable for years) | Already 10–25× slower before any work |
+| Copy 64-byte result back over PCIe | tens of µs | Worse |
+| GPU hash-table *batch* find (research tables) | ~0.3 ms per batch | Fine for “search 100k symbols”, not for one FQCN |
+| NVIDIA’s own rule of thumb | pack ≥ ~1 ms of work per launch | LSP lookups are microseconds of work |
+
+GPUs beat CPUs at *random-access throughput* (cuCollections, RAPIDS). They lose at *single-lookup latency*. An LSP is a latency service.
+
+Pointer-rich data (CSTs, type graphs, parent pointers) cannot sit usefully in VRAM anyway. You would first flatten them into SoA / integer IDs — which is exactly the compact disk format we already want. Once it is compact, **mmap on the CPU is the faster random-access store**.
+
+Windows WDDM makes launch latency worse than Linux/TCC. Many Cursor users are on that path.
+
+### What VRAM *is* good for
+
+Dense, data-parallel work where 3 ms is acceptable:
+
+1. **Embedding matrix / ANN index** for “find code like this” (FAISS + NVIDIA cuVS / CAGRA, or a float32 sidecar like [srclight](https://github.com/slyccc/srclight) ~3 ms for 27k vectors). [Engram](https://github.com/Artemarius/Engram) does the same for MCP: tree-sitter chunks → GPU embed → HNSW, sub-3 ms. That is agent retrieval, not hover.
+2. **Indexing throughput** — batch-embed changed files. Build on GPU, *search on CPU* is a documented FAISS pattern (CAGRA graph → HNSW).
+3. **Workspace-wide fuzzy scan** if we ever batch “all symbols matching `wp_get_*`” as one kernel. Still optional; a SIMD CPU scan of interned names is usually enough at WP-plugin scale.
+
+Those features fight Cursor and local LLMs for the **same** VRAM. A 428 MB embedding matrix (srclight’s 27k × 4096-d example) is a real tax next to a 7B model. The core LSP must not require a GPU.
+
+### Decision
+
+| Layer | Where it lives | Why |
+| --- | --- | --- |
+| Open-file CST / type snapshot | CPU RAM, arena, LRU | Latency, mutation, UTF-16 edge |
+| Symbol / reference index (the RAM hurdle) | **Disk mmap, CPU** | 300 ns lookup, no GPU, works on every Mac |
+| Optional semantic sidecar | VRAM *if* discrete GPU and user opts in; else RAM/disk | Dense GEMM/ANN; never on the completion critical path |
+| Apple Silicon | Treat GPU buffers as **the same RAM** | Unified memory; do not pretend we saved RSS |
+
+Do not put the hurdle in VRAM for v1. Keep the compact mmap index. If we later want AI-shaped `workspace/symbol` or an MCP “search this repo”, add a **feature-flagged embedding index** that can live in VRAM on NVIDIA and in unified memory on Apple — measured separately from the 80 MB idle bar.
+
+---
+
+## 8. Risks
 
 - **Rebuilding Intelephense.** Feature-complete PHP analysis is years. Scope to navigation + completion + diagnostics on a budget, then deepen WP-specific intelligence.
 - **rowan/salsa by default.** They optimize for incrementality and IDE fidelity, not RSS. Use them only for the *open file*.
 - **Indexing vendor/wp-includes fully.** That is how Node servers reach 1 GB. Stubs + lazy type-on-demand.
 - **UTF-16 / Windows paths / cancellation.** LSP edge cases eat time. Put them in `lsp-core` tests before fancy analysis.
 - **PHPantom already exists.** A generic PHP clone has no reason to live. WordPress-shaped intelligence + multi-language process consolidation is the reason this repo exists.
+- **VRAM as a fake RAM win.** On Apple Silicon it is the same DRAM. On NVIDIA it adds launch latency and fights local models. GPU only as an opt-in dense sidecar.
 
 ---
 
-## 8. Sources
+## 9. Sources
 
 - LSP overview and spec 3.18: https://microsoft.github.io/language-server-protocol/
 - Official SDKs: https://microsoft.github.io/language-server-protocol/implementors/sdks/
@@ -276,10 +332,16 @@ Parser v1: **tree-sitter-php** (incremental, error-tolerant, good enough for sym
 - async-lsp vs tower-lsp notification ordering: https://github.com/oxalica/async-lsp
 - Intelephense OOM / maxMemory: https://github.com/bmewburn/vscode-intelephense/issues/590
 - Node empty-process RSS ~30–50 MB: widely reproduced; V8 new-space also inflates RSS under load
+- Apple Silicon unified memory (no separate VRAM): https://www.macinternals.app/en/blog/apple-gpu-and-metal
+- CUDA kernel launch floor ~5 µs: NVIDIA forums, long-standing PCIe lower bound
+- GPU hash maps are throughput tools: https://developer.nvidia.com/blog/maximizing-performance-with-massively-parallel-hash-maps-on-gpus/
+- mmap CPU lookup ~350 ns p50: maph / similar compact indexes
+- GPU code-search sidecars: https://github.com/Artemarius/Engram, https://github.com/slyccc/srclight
+- FAISS + NVIDIA cuVS (build on GPU, search on CPU is supported): https://engineering.fb.com/2025/05/08/data-infrastructure/accelerating-gpu-indexes-in-faiss-with-nvidia-cuvs/
 
 ---
 
-## 9. Decision
+## 10. Decision
 
 | Decision | Choice |
 | --- | --- |
@@ -287,8 +349,9 @@ Parser v1: **tree-sitter-php** (incremental, error-tolerant, good enough for sym
 | Not now | Zig (keep as allocator experiment), C++ (no Clang to wrap), Go (no tsserver to port) |
 | Protocol stack | `lsp-server` + `lsp-types`, sync main loop |
 | RAM strategy | open-file CST + mmap compact index + per-request arenas |
+| VRAM | **Not for the symbol index.** Optional later embedding sidecar, NVIDIA opt-in; Apple Silicon counts as RAM |
 | First language | PHP with WordPress stubs/hooks |
 | Success bar | &lt; 80 MB idle RSS on a WP plugin fixture, &lt; 2 s to first completion |
-| Non-goal | TypeScript type checker, Intelephense-complete PHP in v1 |
+| Non-goal | TypeScript type checker, Intelephense-complete PHP in v1, GPU required for core LSP |
 
 Implementation should not start until this direction is accepted. The next commit after that is a hello-world `initialize` / `shutdown` server that prints RSS, not a parser.

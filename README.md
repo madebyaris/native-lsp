@@ -17,6 +17,7 @@ Native code can drop that runtime tax. It does not automatically drop RAM: `rust
 | Language | **Rust** (Zig and C++ evaluated; Go noted because TypeScript 7 went that way) |
 | Protocol | LSP 3.17+ over stdio, `lsp-server` + `lsp-types` |
 | RAM model | Arena for the current file, mmap symbol index, no vendor/`node_modules` by default |
+| VRAM | Not for the symbol table (Apple Silicon is the same DRAM; CUDA lookups are too slow per keystroke). Optional later embedding sidecar |
 | First language | PHP, WordPress-shaped (`wp-includes` stubs, hooks) |
 | Success bar | Idle RSS **&lt; 80 MB** on a typical WP plugin fixture |
 | Not in scope | TypeScript type checking (`tsgo` already exists), cloning Intelephense |
