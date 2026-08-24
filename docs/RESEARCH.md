@@ -8,6 +8,8 @@
 
 **Index math:** intern `u32` IDs, mmap FST for names, Bloom skip + Elias–Fano/Roaring postings, CSR graphs, and **viewport** token ranges — not sketches on goto-def.
 
+**Disk / stream:** the index lives on disk; RAM is a query window. Build as an append stream, answer as an iterator (`partialResultToken`). mmap on local SSD; `pread` stream on NFS/SSH. Not “grep the repo.”
+
 ---
 
 ## 1. Why Node.js LSPs feel heavy
@@ -477,7 +479,55 @@ These are orthogonal to host profiles and sleep. They shrink the **mmap payload*
 
 ---
 
-## 10. Risks
+## 10. Disk as source of truth, stream as the mode
+
+Put the LSP **index** on disk. Keep RAM as a **moving window** over that file: one request, a few pages, then drop. That is how rust-glancer stays small, and it is how LSIF was specified (“emit data as soon as it is available” so you never hold the whole graph).
+
+Do **not** interpret “stream mode” as grepping the workspace on every hover. A linear scan of `wp-includes` is the old RAM/CPU problem with extra syscalls. Stream the **build** and stream the **results**. Lookups still hit a compact on-disk index.
+
+### Three streams (different jobs)
+
+| Stream | What moves | RAM while it runs |
+| --- | --- | --- |
+| **Build** | Files in, records out | One file’s CST + an append buffer. Flush a shard, forget the tree. |
+| **Query** | Iterator of hits to the editor | Decode one posting block / FST node at a time; stop at `limit`. |
+| **Wire** | LSP `partialResultToken` + `$/progress` | Never `Vec` of “all references in the repo” before the first paint. |
+
+**Build stream.** Walk the tree once. For each PHP file: parse → intern → append posting/FST deltas to a write-ahead log → drop the CST. Compact the WAL into an immutable snapshot (FST + Elias–Fano/Roaring + CSR) on idle or on save. Same idea as LSIF’s “emit per document as parsing progresses,” but our snapshot is binary, not a JSON graph (LSIF dumps are large; SCIP is ~4× smaller gzipped and still a *dump* for code browsers, not a live editor index).
+
+**Query stream.** rust-glancer: frozen analysis on disk; a query opens a **transaction**, maps only the packages it needs, answers, **drops the transaction**. Unsaved typing uses the open buffer + last snapshot (locals work; new `function` names wait for save). Completions: FST cursor, take 20, stop. Find-refs: skip with Bloom, then stream the posting list; send partial LSP results so the UI fills in.
+
+**Wire stream.** LSP already streams: stdio JSON-RPC, plus `partialResultToken` on `references`, `workspace/symbol`, and (in some servers) completion. We should implement partial results so a 10k-hit `add_action` does not allocate 10k `Location`s before `Content-Length` goes out.
+
+### mmap vs stream I/O (other computers)
+
+Virtual address space is not RSS. `mmap` of a 200 MB index can RSS at 8 MB if you only touch the FST root + one posting list. The OS page cache is the real RAM budget; `MADV_RANDOM` / `DONTNEED` on park (see §8).
+
+| Disk | Access | Why |
+| --- | --- | --- |
+| Local SSD | **mmap** | Random goto-def; warm page = pointer load, no syscall. |
+| HDD / sequential bulk reindex | **`read` / `pread` stream** | Kernel readahead beats per-page faults on a single pass. |
+| NFS, SSHFS, some cloud mounts | **`pread` only** | mmap on network FS is coherency- and SIGBUS-hostile. |
+
+Host profile grows an I/O mode: `mmap` | `stream-pread`. Same `IndexReader` trait. SSH remote to a WP site is `cpu` + `stream-pread`.
+
+### What stays in RAM
+
+- Active document rope + its CST (nap drops the CST).
+- Intern table for **this query** (or a small LRU of intern pages).
+- Optional NVIDIA embedding sidecar (still not the symbol index).
+
+Disk holds: snapshot, WAL, stubs. Hibernate = unmap / close fd; disk stays. Cold start after `exit` is “open snapshot header,” not reindex — if the digest still matches.
+
+### What we will not do
+
+- LSIF JSON as the live format (graph of allocated nodes; Microsoft’s own LSIF overview exists so you *don’t* keep ASTs, but the dump is still heavy).
+- Stream without an index (workspace grep).
+- Rewrite the snapshot on every keystroke (stream the dirty **body** only, like rust-glancer).
+
+---
+
+## 11. Risks
 
 - **Rebuilding Intelephense.** Feature-complete PHP analysis is years. Scope to navigation + completion + diagnostics on a budget, then deepen WP-specific intelligence.
 - **rowan/salsa by default.** They optimize for incrementality and IDE fidelity, not RSS. Use them only for the *open file*.
@@ -488,10 +538,12 @@ These are orthogonal to host profiles and sleep. They shrink the **mmap payload*
 - **Guessing idle from silence.** File watchers and pull diagnostics keep the wire busy; “user is reading” sends nothing. Sleep is a client notification.
 - **Tab switch ≠ `didClose`.** Dropping all open documents on hide would desync dirty buffers. Nap per URI, not a fake close.
 - **Approximate structures on the critical path.** Bloom/SuRF may false-positive; never false-negative goto-def. Exact ID lookup stays on intern + perfect hash.
+- **mmap on network disks.** SIGBUS / stale cache. Remote workspaces use `pread` stream mode.
+- **Streaming without a snapshot.** A WAL-only index makes goto-def a log scan. Compact on idle.
 
 ---
 
-## 11. Sources
+## 12. Sources
 
 - LSP overview and spec 3.18: https://microsoft.github.io/language-server-protocol/
 - Official SDKs: https://microsoft.github.io/language-server-protocol/implementors/sdks/
@@ -522,10 +574,15 @@ These are orthogonal to host profiles and sleep. They shrink the **mmap payload*
 - SuRF / succinct tries (~10 bits/node): https://cacm.acm.org/research/succinct-range-filters/
 - clangd interned zlib string table: `clang-tools-extra/clangd/index/Serialization.cpp`
 - LSP semantic tokens range (viewport): https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_semanticTokens
+- LSIF overview (emit as data is available / stream build): https://microsoft.github.io/language-server-protocol/overviews/lsif/overview/
+- SCIP vs LSIF size: https://sourcegraph.com/blog/announcing-scip
+- rust-glancer frozen disk index + per-query transaction: https://rust-glancer.github.io/docs/architecture/ARCHITECTURE.html
+- LSP partial results: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#partialResults
+- mmap vs sequential `read` / NFS: kernel I/O practice; avoid mmap on network FS
 
 ---
 
-## 12. Decision
+## 13. Decision
 
 | Decision | Choice |
 | --- | --- |
@@ -537,6 +594,7 @@ These are orthogonal to host profiles and sleep. They shrink the **mmap payload*
 | Host profiles | One binary: `cpu` / `apple-unified` / `nvidia-discrete` / `unknown`; skip missing steps |
 | Lifecycle | IDE sends visibility + sleep/wake; server does not guess; depths nap → park → hibernate → exit |
 | Index math | Intern `u32` IDs; FST names; Bloom skip + Elias–Fano/Roaring postings; CSR graphs; viewport range tokens |
+| Disk / stream | Snapshot + WAL on disk; RAM = query window; mmap locally, `pread` on NFS/SSH; LSP `partialResultToken` |
 | First language | PHP with WordPress stubs/hooks |
 | Success bar | &lt; 80 MB idle RSS on a WP plugin fixture, &lt; 2 s to first completion; nap wake &lt; 20 ms |
 | Non-goal | TypeScript type checker, Intelephense-complete PHP in v1, GPU required for core LSP |
