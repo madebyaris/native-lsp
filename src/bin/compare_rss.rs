@@ -130,7 +130,8 @@ fn measure(
     client.notify("initialized", json!({}))?;
 
     std::thread::sleep(Duration::from_millis(50));
-    let idle = native_lsp::rss::rss_bytes_of(pid.to_string()).unwrap_or(0);
+    let idle = native_lsp::rss::rss_bytes_of(pid.to_string())
+        .ok_or_else(|| format!("could not read RSS for pid {pid}"))?;
 
     for path in files {
         let text = std::fs::read_to_string(path)?;
@@ -160,14 +161,16 @@ fn measure(
     let hover_ms = t0.elapsed().as_millis();
 
     std::thread::sleep(Duration::from_millis(80));
-    let after_open = native_lsp::rss::rss_bytes_of(pid.to_string()).unwrap_or(0);
+    let after_open = native_lsp::rss::rss_bytes_of(pid.to_string())
+        .ok_or_else(|| format!("could not read RSS after open for pid {pid}"))?;
 
     client.notify(
         "$/nativeLsp/sleep",
         json!({ "reason": "idle", "depth": "park" }),
     )?;
     std::thread::sleep(Duration::from_millis(80));
-    let after_sleep = native_lsp::rss::rss_bytes_of(pid.to_string()).unwrap_or(0);
+    let after_sleep = native_lsp::rss::rss_bytes_of(pid.to_string())
+        .ok_or_else(|| format!("could not read RSS after sleep for pid {pid}"))?;
 
     let _ = client.request("shutdown", json!(null));
     client.notify("exit", json!(null))?;

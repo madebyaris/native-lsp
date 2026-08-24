@@ -44,6 +44,8 @@ cargo build --release --bin native-lsp --bin compare-rss
 
 Success bar from research: native idle/open RSS **under 80 MB**.
 
+Latest run (Linux, release, same fixture): native **~2.3 MB** vs Node **~47–54 MB**. Full table: [`docs/COMPARISON.md`](docs/COMPARISON.md).
+
 ## License
 
 TBD.
