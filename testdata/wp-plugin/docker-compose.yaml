@@ -1,0 +1,12 @@
+services:
+  web:
+    image: wordpress:6.6
+    ports:
+      - "8080:80"
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: native_shop
+
+volumes:
+  pgdata:

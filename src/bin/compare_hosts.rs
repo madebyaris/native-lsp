@@ -1,6 +1,6 @@
 //! Drive Neovim, Emacs, Helix, VS Code, and native-ide with the same LSP A/B.
 
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -28,6 +28,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     reap_stray_lsps();
+    if profile_real() {
+        return run_vscode_real(&root, &native_bin);
+    }
     eprintln!("root:    {}", root.display());
     eprintln!("native:  {}", native_bin.display());
     eprintln!("nvim:    {}", which("nvim").display());
@@ -117,6 +120,128 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn profile_real() -> bool {
+    std::env::var("COMPARE_PROFILE")
+        .map(|s| s.eq_ignore_ascii_case("real"))
+        .unwrap_or(false)
+}
+
+fn run_vscode_real(
+    root: &Path,
+    native_bin: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = fixture::wp_plugin_dir();
+    if !workspace.is_dir() {
+        return Err(format!("missing workspace {}", workspace.display()).into());
+    }
+    eprintln!("profile: real-world VS Code (WordPress-shaped plugin)");
+    eprintln!("root:    {}", root.display());
+    eprintln!("native:  {}", native_bin.display());
+    eprintln!("workspace: {}", workspace.display());
+
+    let mut rows = Vec::new();
+    let mut dumps = Vec::new();
+    let mut probes = Vec::new();
+    for kind in ["native", "stock"] {
+        eprintln!("--- vscode + {kind} ---");
+        match measure_vscode_workspace(kind, root, native_bin, &workspace, true) {
+            Ok(measured) => {
+                eprintln!(
+                    "  IDE {}  LSP {}  total {}  hover {}",
+                    rss::format_mb(measured.row.ide_bytes),
+                    measured
+                        .row
+                        .lsp_bytes
+                        .map(rss::format_mb)
+                        .unwrap_or_else(|| "n/a".into()),
+                    rss::format_mb(measured.row.total()),
+                    measured.row.hover_files,
+                );
+                if let Some(dump) = measured.vscode {
+                    dumps.push(dump);
+                }
+                if let Some(p) = measured.probes {
+                    probes.push((kind.to_string(), p));
+                }
+                rows.push(measured.row);
+            }
+            Err(err) => eprintln!("  failed: {err}"),
+        }
+    }
+
+    println!();
+    println!("## Real-world VS Code: native-lsp vs built-in language servers");
+    println!();
+    println!("Workspace: `testdata/wp-plugin/` (WordPress-shaped plugin: PHP, JS, TS, HTML,");
+    println!("CSS, JSON, YAML, SQL). VS Code opens the folder. Hover / document symbols /");
+    println!("completion go through `vscode.executeHoverProvider` — the same API the UI uses.");
+    println!();
+    println!("**native** disables html/css/json/typescript/php language features so only");
+    println!("native-lsp answers. **stock** is current VS Code: `htmlServerMain`,");
+    println!("`cssServerMain`, `jsonServerMain`, and `tsserver` — no native-lsp client.");
+    println!("Probes use `vscode.executeHoverProvider` / `executeDocumentSymbolProvider` /");
+    println!("`executeCompletionItemProvider`, the same commands the editor UI uses.");
+    println!();
+    println!("| stack | IDE | language servers | total | files with hover |");
+    println!("| --- | ---: | ---: | ---: | ---: |");
+    for row in &rows {
+        println!(
+            "| vscode + {} | {} | {} | {} | {} |",
+            row.server,
+            rss::format_mb(row.ide_bytes),
+            row.lsp_bytes
+                .map(rss::format_mb)
+                .unwrap_or_else(|| "_n/a_".into()),
+            rss::format_mb(row.total()),
+            row.hover_files
+        );
+    }
+    println!();
+    for (kind, list) in &probes {
+        println!("### vscode + {kind} probes");
+        println!();
+        println!("| file | language | symbols | completions | hover |");
+        println!("| --- | --- | ---: | ---: | --- |");
+        for p in list {
+            println!(
+                "| `{}` | {} | {} | {} | {} |",
+                p.path,
+                p.language_id,
+                p.symbol_count,
+                p.completion_count,
+                if p.hover.is_empty() {
+                    "_none_".into()
+                } else {
+                    format!("`{}`", p.hover.replace('|', " ").replace('`', "'"))
+                }
+            );
+        }
+        println!();
+    }
+    for dump in &dumps {
+        println!("### vscode + {} language servers", dump.server);
+        println!();
+        print!("{}", rss::format_lsp_breakdown(&dump.procs));
+        println!();
+        println!("### vscode + {} process tree", dump.server);
+        println!();
+        print!("{}", rss::format_role_totals(&dump.procs));
+        println!();
+        print!("{}", rss::format_proc_table(&dump.procs));
+        println!();
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct ProbeRow {
+    path: String,
+    language_id: String,
+    symbol_count: usize,
+    completion_count: usize,
+    hover: String,
+}
+
 fn host_wanted(host: Host) -> bool {
     let Ok(raw) = std::env::var("COMPARE_HOSTS") else {
         return true;
@@ -175,6 +300,7 @@ struct VsCodeDump {
 struct Measured {
     row: Row,
     vscode: Option<VsCodeDump>,
+    probes: Option<Vec<ProbeRow>>,
 }
 
 impl Row {
@@ -199,7 +325,11 @@ fn measure(
 }
 
 fn wrap_row(row: Row) -> Result<Measured, Box<dyn std::error::Error>> {
-    Ok(Measured { row, vscode: None })
+    Ok(Measured {
+        row,
+        vscode: None,
+        probes: None,
+    })
 }
 
 fn measure_native_ide(kind: &str, root: &Path) -> Result<Row, Box<dyn std::error::Error>> {
@@ -389,21 +519,18 @@ fn measure_vscode(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let mut ide_pids = Vec::new();
-    let mut lsp_pid: Option<u32>;
     let deadline = Instant::now() + Duration::from_secs(25);
     while Instant::now() < deadline {
-        ide_pids = rss::pids_with_cmdline(&marker);
-        lsp_pid = ide_pids.iter().copied().find_map(rss::find_lsp_pid);
-        if !ide_pids.is_empty() && lsp_pid.is_some() {
+        let found = rss::pids_with_cmdline(&marker);
+        if !found.is_empty() && found.iter().copied().find_map(rss::find_lsp_pid).is_some() {
             break;
         }
         thread::sleep(Duration::from_millis(400));
     }
     // Electron keeps spawning renderer / extensionHost after the first window.
     thread::sleep(Duration::from_secs(5));
-    ide_pids = rss::pids_with_cmdline(&marker);
-    lsp_pid = ide_pids.iter().copied().find_map(rss::find_lsp_pid);
+    let ide_pids = rss::pids_with_cmdline(&marker);
+    let lsp_pid = ide_pids.iter().copied().find_map(rss::find_lsp_pid);
     let ide = ide_pids
         .iter()
         .copied()
@@ -438,7 +565,185 @@ fn measure_vscode(
             server: kind.into(),
             procs,
         }),
+        probes: None,
     })
+}
+
+fn measure_vscode_workspace(
+    kind: &str,
+    root: &Path,
+    native_bin: &Path,
+    workspace: &Path,
+    probe: bool,
+) -> Result<Measured, Box<dyn std::error::Error>> {
+    let dir = unique_dir("vscode");
+    let user = dir.join("user");
+    let ext = dir.join("ext");
+    install_vscode_extension(&ext, root)?;
+    let settings_dir = user.join("User");
+    fs::create_dir_all(&settings_dir)?;
+    let report_path = dir.join("report.json");
+    let log_path = dir.join("extension.log");
+    let mut settings = serde_json::json!({
+        "nativeLsp.root": root.display().to_string(),
+        "nativeLsp.enable": kind != "stock",
+        "nativeLsp.reportPath": report_path.display().to_string(),
+        "nativeLsp.logPath": log_path.display().to_string(),
+        "files.autoSave": "off",
+        "telemetry.telemetryLevel": "off",
+        "update.mode": "none",
+        "extensions.autoCheckUpdates": false,
+        "extensions.autoUpdate": false,
+        "workbench.startupEditor": "none",
+        "editor.quickSuggestions": false,
+        "extensions.ignoreRecommendations": true,
+    });
+    if kind == "native" {
+        settings["nativeLsp.command"] = serde_json::json!([native_bin.display().to_string()]);
+    } else if kind == "node" {
+        settings["nativeLsp.command"] = serde_json::json!([
+            fixture::default_node_bin(),
+            root.join("compare/node-lsp.mjs").display().to_string()
+        ]);
+    }
+    fs::write(
+        settings_dir.join("settings.json"),
+        serde_json::to_vec_pretty(&settings)?,
+    )?;
+    let marker = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let mut args = vec![
+        "--disable-gpu".into(),
+        "--disable-workspace-trust".into(),
+        "--skip-release-notes".into(),
+        "--skip-welcome".into(),
+        "--new-window".into(),
+        format!("--user-data-dir={}", user.display()),
+        format!("--extensions-dir={}", ext.display()),
+    ];
+    if kind == "native" {
+        for ext_id in [
+            "vscode.html-language-features",
+            "vscode.css-language-features",
+            "vscode.json-language-features",
+            "vscode.typescript-language-features",
+            "vscode.php-language-features",
+        ] {
+            args.push(format!("--disable-extension={ext_id}"));
+        }
+    }
+    args.push(workspace.display().to_string());
+    args.push(workspace.join("native-shop.php").display().to_string());
+    let stdout_path = dir.join("code.stdout");
+    let stderr_path = dir.join("code.stderr");
+    let mut child = Command::new("code")
+        .current_dir(workspace)
+        .args(&args)
+        .env(
+            "DISPLAY",
+            std::env::var("DISPLAY").unwrap_or_else(|_| ":1".into()),
+        )
+        .env("NATIVE_LSP_ROOT", root)
+        .env("NATIVE_LSP_KIND", kind)
+        .env("NATIVE_LSP_BIN", native_bin)
+        .env("NATIVE_LSP_REPORT", &report_path)
+        .stdin(Stdio::null())
+        .stdout(File::create(&stdout_path)?)
+        .stderr(File::create(&stderr_path)?)
+        .spawn()?;
+    if probe {
+        if let Err(err) = wait_for_report(&report_path, Duration::from_secs(90)) {
+            let _ = child.kill();
+            reap_marker(&marker);
+            let extra = fs::read_to_string(&log_path).unwrap_or_default();
+            return Err(format!("{err}\nextension.log:\n{extra}").into());
+        }
+        thread::sleep(Duration::from_millis(500));
+    } else {
+        thread::sleep(Duration::from_secs(6));
+    }
+    // Stock html/css/json/tsserver stay up after the first probe. Sample until
+    // at least one language-server child is visible, then take RSS.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let (ide, lsp, procs) = loop {
+        let sample = sample_vscode_marker(&marker);
+        if sample.1.is_some() || Instant::now() >= deadline {
+            break sample;
+        }
+        thread::sleep(Duration::from_millis(300));
+    };
+    let probes = parse_vscode_report(&report_path);
+    let hover_files = probes
+        .as_ref()
+        .map(|p| p.iter().filter(|r| !r.hover.is_empty()).count())
+        .unwrap_or(0);
+    let _ = child.kill();
+    let _ = child.wait();
+    reap_marker(&marker);
+    Ok(Measured {
+        row: Row {
+            host: "vscode".into(),
+            server: kind.into(),
+            ide_bytes: ide,
+            lsp_bytes: lsp,
+            hover_files,
+        },
+        vscode: Some(VsCodeDump {
+            server: kind.into(),
+            procs,
+        }),
+        probes,
+    })
+}
+
+fn reap_marker(marker: &str) {
+    for pid in rss::pids_with_cmdline(marker) {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+}
+
+fn sample_vscode_marker(marker: &str) -> (u64, Option<u64>, Vec<rss::ProcSample>) {
+    let ide_pids = rss::expand_tree(&rss::pids_with_cmdline(marker));
+    let lsp_bytes = rss::lsp_bytes_in(&ide_pids);
+    let ide = ide_pids
+        .iter()
+        .copied()
+        .filter(|p| !rss::is_lsp_pid(*p))
+        .filter_map(|p| rss::rss_bytes_of(p.to_string()))
+        .sum();
+    (
+        ide,
+        if lsp_bytes == 0 { None } else { Some(lsp_bytes) },
+        rss::sample_procs(&ide_pids),
+    )
+}
+
+fn parse_vscode_report(path: &Path) -> Option<Vec<ProbeRow>> {
+    let text = fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let arr = v.get("probes")?.as_array()?;
+    let mut out = Vec::new();
+    for p in arr {
+        out.push(ProbeRow {
+            path: p
+                .get("path")
+                .or_else(|| p.get("name"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            language_id: p
+                .get("languageId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            symbol_count: p.get("symbolCount").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+            completion_count: p
+                .get("completionCount")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as usize,
+            hover: p.get("hover").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        });
+    }
+    Some(out)
 }
 
 fn sample_host(
@@ -506,6 +811,21 @@ fn wait_for_file(path: &Path, timeout: Duration) -> Result<(), Box<dyn std::erro
         thread::sleep(Duration::from_millis(50));
     }
     Err(format!("timed out waiting for {}", path.display()).into())
+}
+
+fn wait_for_report(path: &Path, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(text) = fs::read_to_string(path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if v.get("probes").and_then(|p| p.as_array()).is_some() {
+                    return Ok(());
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    Err(format!("timed out waiting for VS Code probe report {}", path.display()).into())
 }
 
 fn wait_child(child: &mut Child, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
@@ -623,7 +943,7 @@ fn write_helix_config(
 
 fn install_vscode_extension(ext_dir: &Path, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let src = root.join("editors/vscode");
-    let dest = ext_dir.join("native-lsp.native-lsp-host-0.1.0");
+    let dest = ext_dir.join("native-lsp.native-lsp-0.1.0");
     fs::create_dir_all(ext_dir)?;
     if dest.exists() {
         fs::remove_dir_all(&dest)?;

@@ -101,13 +101,40 @@ pub fn is_lsp_pid(pid: u32) -> bool {
 }
 
 /// Token match: the binary path, not `cargo --bin native-lsp` or a temp dir.
+/// Also matches VS Code's built-in Node language servers (html/css/json/tsserver).
 pub fn cmdline_looks_like_lsp(comm: &str, cmdline: &str) -> bool {
     if comm == "native-lsp" {
         return true;
     }
-    cmdline
+    if cmdline
         .split_whitespace()
         .any(|part| part.ends_with("/native-lsp") || part.ends_with("node-lsp.mjs"))
+    {
+        return true;
+    }
+    stock_lsp_role(cmdline).is_some()
+}
+
+pub fn stock_lsp_role(cmdline: &str) -> Option<&'static str> {
+    if cmdline.contains("htmlServerMain") || cmdline.contains("htmlServer.js") {
+        return Some("html-language-features");
+    }
+    if cmdline.contains("cssServerMain") || cmdline.contains("cssServer.js") {
+        return Some("css-language-features");
+    }
+    if cmdline.contains("jsonServerMain") || cmdline.contains("jsonServer.js") {
+        return Some("json-language-features");
+    }
+    if cmdline.contains("tsserver") {
+        return Some("tsserver");
+    }
+    if cmdline.contains("intelephense") {
+        return Some("intelephense");
+    }
+    if cmdline.contains("yaml-language-server") {
+        return Some("yaml-language-server");
+    }
+    None
 }
 
 fn looks_like_lsp(pid: u32) -> bool {
@@ -121,6 +148,24 @@ pub struct ProcSample {
     pub comm: String,
     pub role: String,
     pub rss_bytes: u64,
+}
+
+pub fn expand_tree(pids: &[u32]) -> Vec<u32> {
+    let mut all = pids.to_vec();
+    for pid in pids {
+        all.extend(descendants(*pid));
+    }
+    all.sort_unstable();
+    all.dedup();
+    all
+}
+
+pub fn lsp_bytes_in(pids: &[u32]) -> u64 {
+    pids.iter()
+        .copied()
+        .filter(|p| is_lsp_pid(*p))
+        .filter_map(|p| rss_bytes_of(p.to_string()))
+        .sum()
 }
 
 pub fn sample_procs(pids: &[u32]) -> Vec<ProcSample> {
@@ -141,11 +186,15 @@ pub fn sample_procs(pids: &[u32]) -> Vec<ProcSample> {
 }
 
 pub fn process_role(pid: u32) -> String {
-    if is_lsp_pid(pid) {
-        if comm(pid) == "native-lsp" {
-            return "language-server (native-lsp)".into();
-        }
+    let cmd = cmdline(pid);
+    if comm(pid) == "native-lsp" || cmd.split_whitespace().any(|p| p.ends_with("/native-lsp")) {
+        return "language-server (native-lsp)".into();
+    }
+    if cmd.split_whitespace().any(|p| p.ends_with("node-lsp.mjs")) {
         return "language-server (node-lsp)".into();
+    }
+    if let Some(stock) = stock_lsp_role(&cmd) {
+        return format!("language-server ({stock})");
     }
     let comm_name = comm(pid);
     if comm_name.contains("crashpad") {
@@ -211,6 +260,30 @@ pub fn format_proc_table(rows: &[ProcSample]) -> String {
     out
 }
 
+/// RSS of every process that looks like a language server, grouped by role.
+pub fn format_lsp_breakdown(rows: &[ProcSample]) -> String {
+    let lsps: Vec<_> = rows
+        .iter()
+        .filter(|r| r.role.starts_with("language-server"))
+        .collect();
+    if lsps.is_empty() {
+        return String::from("_no language-server processes found in the VS Code tree_\n");
+    }
+    let mut out = String::from("| language server | pid | RSS |\n| --- | ---: | ---: |\n");
+    let mut total = 0u64;
+    for row in &lsps {
+        total += row.rss_bytes;
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            row.role,
+            row.pid,
+            format_mb(row.rss_bytes)
+        ));
+    }
+    out.push_str(&format!("| **sum** | {} | **{}** |\n", lsps.len(), format_mb(total)));
+    out
+}
+
 pub fn format_role_totals(rows: &[ProcSample]) -> String {
     use std::collections::BTreeMap;
     let mut totals: BTreeMap<&str, (u64, usize)> = BTreeMap::new();
@@ -253,5 +326,13 @@ mod tests {
             "code",
             "code --user-data-dir=/tmp/native-lsp-vscode-1/user"
         ));
+        assert!(cmdline_looks_like_lsp(
+            "node",
+            "node /usr/share/code/resources/app/extensions/html-language-features/server/dist/node/htmlServerMain.js --node-ipc"
+        ));
+        assert_eq!(
+            stock_lsp_role("node .../tsserver.js --useInferredProjectPerProjectRoot"),
+            Some("tsserver")
+        );
     }
 }
